@@ -28,7 +28,7 @@ const client = new Client({
 });
 
 client.once("ready", () => {
-    console.log("🔥 FULL DRAFT SYSTEM READY");
+    console.log("🔥 ULTIMATE COMPETITIVE SYSTEM READY");
 });
 
 /* ================= DATA ================= */
@@ -61,8 +61,6 @@ const ALL_CHAMPIONS = [
 
 /* ================= MATCH STATE ================= */
 
-let match = resetMatch();
-
 function resetMatch(){
     return {
         active:false,
@@ -75,12 +73,15 @@ function resetMatch(){
         picks:{},
         turn:null,
         timeout:null,
-        voiceCategory:null,
+        channel:null,
+        lobbyVoice:null,
+        category:null,
         voiceA:null,
-        voiceB:null,
-        channel:null
+        voiceB:null
     };
 }
+
+let match = resetMatch();
 
 /* ================= QUEUE ================= */
 
@@ -128,7 +129,7 @@ client.on("interactionCreate", async interaction=>{
 
     if(!interaction.isButton()) return;
 
-    /* ===== QUEUE ===== */
+    /* QUEUE */
 
     if(interaction.customId==="join"){
         if(match.active) return interaction.reply({content:"Match running.",ephemeral:true});
@@ -146,8 +147,7 @@ client.on("interactionCreate", async interaction=>{
         });
 
         if(queue.length===6){
-            startMatch(queue, interaction.channel);
-            queue=[];
+            await createLobby(interaction.channel);
         }
     }
 
@@ -159,40 +159,7 @@ client.on("interactionCreate", async interaction=>{
         });
     }
 
-    /* ===== DRAFT BUTTONS ===== */
-
-    if(match.active && interaction.customId.startsWith("champ_")){
-        if(interaction.user.id!==match.turn)
-            return interaction.reply({content:"Not your turn.",ephemeral:true});
-
-        const champ=interaction.customId.replace("champ_","");
-        if(!match.available.includes(champ))
-            return interaction.reply({content:"Unavailable.",ephemeral:true});
-
-        clearTimeout(match.timeout);
-
-        match.available=match.available.filter(c=>c!==champ);
-
-        if(match.phase==="banA"){
-            await interaction.update({content:`🚫 Team A banned ${champ}`,components:[]});
-            match.phase="banB";
-            match.turn=match.captainB;
-            sendDraft();
-        }
-        else if(match.phase==="banB"){
-            await interaction.update({content:`🚫 Team B banned ${champ}`,components:[]});
-            match.phase="pick";
-            match.turn=match.teamA[0];
-            sendDraft();
-        }
-        else{
-            match.picks[interaction.user.id]=champ;
-            await interaction.update({content:`✅ <@${interaction.user.id}> picked ${champ}`,components:[]});
-            nextPick();
-        }
-    }
-
-    /* ===== VOTE ===== */
+    /* VOTE */
 
     if(match.active && interaction.customId==="voteA"){
         finishMatch("A");
@@ -205,23 +172,83 @@ client.on("interactionCreate", async interaction=>{
     }
 });
 
+/* ================= LOBBY VOICE ================= */
+
+async function createLobby(channel){
+
+    match = resetMatch();
+    match.active=true;
+    match.phase="waiting_voice";
+    match.channel=channel;
+
+    match.teamA=[];
+    match.teamB=[];
+
+    match.lobbyVoice=await channel.guild.channels.create({
+        name:"🎧 3v3 LOBBY JOIN",
+        type:ChannelType.GuildVoice
+    });
+
+    channel.send("🎧 Lobby created. All 6 players must join this voice channel.");
+
+    client.on("voiceStateUpdate", async (oldState,newState)=>{
+
+        if(!match.active || match.phase!=="waiting_voice") return;
+
+        const members = match.lobbyVoice.members.map(m=>m.id);
+        const allPresent = queue.every(id=>members.includes(id));
+
+        if(allPresent && members.length===6){
+            await startMatch();
+        }
+    });
+}
+
 /* ================= START MATCH ================= */
 
-function startMatch(players, channel){
+async function startMatch(){
 
-    const {A,B}=balance(players);
+    const {A,B}=balance(queue);
 
-    match=resetMatch();
-    match.active=true;
-    match.phase="banA";
     match.teamA=A;
     match.teamB=B;
     match.captainA=A[0];
     match.captainB=B[0];
-    match.turn=match.captainA;
-    match.channel=channel;
+    match.available=[...ALL_CHAMPIONS];
 
-    channel.send(`⚔️ MATCH FOUND\nTeam A Captain: <@${A[0]}>\nTeam B Captain: <@${B[0]}>`);
+    await match.lobbyVoice.delete().catch(()=>{});
+
+    match.category=await match.channel.guild.channels.create({
+        name:"MATCH",
+        type:ChannelType.GuildCategory
+    });
+
+    match.voiceA=await match.channel.guild.channels.create({
+        name:"🔴 Team A",
+        type:ChannelType.GuildVoice,
+        parent:match.category.id
+    });
+
+    match.voiceB=await match.channel.guild.channels.create({
+        name:"🔵 Team B",
+        type:ChannelType.GuildVoice,
+        parent:match.category.id
+    });
+
+    for(const id of A){
+        const member = await match.channel.guild.members.fetch(id);
+        await member.voice.setChannel(match.voiceA).catch(()=>{});
+    }
+
+    for(const id of B){
+        const member = await match.channel.guild.members.fetch(id);
+        await member.voice.setChannel(match.voiceB).catch(()=>{});
+    }
+
+    match.phase="draft";
+    match.turn=match.captainA;
+
+    match.channel.send("⚔️ Teams ready. Draft starting.");
     sendDraft();
 }
 
@@ -231,7 +258,7 @@ function sendDraft(){
 
     const embed=new EmbedBuilder()
         .setTitle("🎯 Draft Phase")
-        .setDescription(`Phase: ${match.phase}\nTurn: <@${match.turn}>`)
+        .setDescription(`Turn: <@${match.turn}>`)
         .setColor(0x00AEFF);
 
     const rows=[];
@@ -253,29 +280,49 @@ function sendDraft(){
 }
 
 function startTimeout(){
+    clearTimeout(match.timeout);
     match.timeout=setTimeout(()=>{
         const random=match.available[Math.floor(Math.random()*match.available.length)];
-        match.channel.send("⏰ Auto select "+random);
         match.available=match.available.filter(c=>c!==random);
-        nextPick();
+        nextPick(random,true);
     },240000);
 }
 
-function nextPick(){
+client.on("interactionCreate", async interaction=>{
 
-    const order=[
-        ...match.teamA,
-        ...match.teamB
-    ];
+    if(!interaction.isButton()) return;
+    if(!match.active || !interaction.customId.startsWith("champ_")) return;
 
-    const picked=Object.keys(match.picks).length;
-    if(picked>=6){
-        finishDraft();
-        return;
+    if(interaction.user.id!==match.turn)
+        return interaction.reply({content:"Not your turn.",ephemeral:true});
+
+    const champ=interaction.customId.replace("champ_","");
+    if(!match.available.includes(champ))
+        return interaction.reply({content:"Unavailable.",ephemeral:true});
+
+    clearTimeout(match.timeout);
+    match.available=match.available.filter(c=>c!==champ);
+
+    nextPick(champ,false,interaction);
+});
+
+function nextPick(champ,auto=false,interaction=null){
+
+    if(match.phase==="draft"){
+        match.picks[match.turn]=champ;
+        if(interaction) interaction.update({content:`Picked ${champ}`,components:[]});
+
+        const order=[...match.teamA,...match.teamB];
+        const picked=Object.keys(match.picks).length;
+
+        if(picked>=6){
+            finishDraft();
+            return;
+        }
+
+        match.turn=order[picked];
+        sendDraft();
     }
-
-    match.turn=order[picked];
-    sendDraft();
 }
 
 /* ================= FINISH DRAFT ================= */
@@ -292,44 +339,13 @@ async function finishDraft(){
         );
 
     await match.channel.send({embeds:[embed]});
-    await createVoice();
-    sendVote();
-}
-
-/* ================= VOICE ================= */
-
-async function createVoice(){
-
-    const guild=match.channel.guild;
-
-    match.voiceCategory=await guild.channels.create({
-        name:"MATCH VOICE",
-        type:ChannelType.GuildCategory
-    });
-
-    match.voiceA=await guild.channels.create({
-        name:"Team A",
-        type:ChannelType.GuildVoice,
-        parent:match.voiceCategory.id
-    });
-
-    match.voiceB=await guild.channels.create({
-        name:"Team B",
-        type:ChannelType.GuildVoice,
-        parent:match.voiceCategory.id
-    });
-}
-
-/* ================= VOTE ================= */
-
-function sendVote(){
 
     const row=new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("voteA").setLabel("Team A Win").setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId("voteB").setLabel("Team B Win").setStyle(ButtonStyle.Danger)
     );
 
-    match.channel.send({content:"Select winner:",components:[row]});
+    await match.channel.send({content:"Select winner:",components:[row]});
 }
 
 /* ================= FINISH MATCH ================= */
@@ -353,8 +369,18 @@ async function finishMatch(winner){
 
     await match.channel.send("🏆 ELO Updated (+25 / -25)");
 
-    if(match.voiceCategory) await match.voiceCategory.delete().catch(()=>{});
+    await cleanup();
+}
 
+/* ================= CLEANUP ================= */
+
+async function cleanup(){
+
+    clearTimeout(match.timeout);
+
+    if(match.category) await match.category.delete().catch(()=>{});
+
+    queue=[];
     match=resetMatch();
 }
 
