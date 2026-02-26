@@ -39,7 +39,6 @@ client.once("ready", () => {
     console.log("BOT READY");
 });
 
-// Auto cleanup queue timeout
 setInterval(() => {
     checkQueueExpiration();
 }, 5 * 60 * 1000);
@@ -49,17 +48,13 @@ setInterval(() => {
 // ============================
 
 function createQueueEmbed() {
-
     const queue = getQueue();
 
     const description = queue.length === 0
         ? "Queue is empty."
         : queue.map((id, i) => {
-
             const stats = getStats(id);
-
             return `#${i + 1} | <@${id}> 🏆 ELO: ${stats?.elo || 1000}`;
-
         }).join("\n──────────────\n");
 
     return new EmbedBuilder()
@@ -87,14 +82,11 @@ function createQueueButtons() {
 // ============================
 
 client.on("messageCreate", async message => {
-
     if (message.content === "!queue") {
-
         await message.channel.send({
             embeds: [createQueueEmbed()],
             components: [createQueueButtons()]
         });
-
     }
 });
 
@@ -103,7 +95,6 @@ client.on("messageCreate", async message => {
 // ============================
 
 client.on("interactionCreate", async interaction => {
-
     if (!interaction.isButton()) return;
 
     if (interaction.customId === "join") {
@@ -111,7 +102,6 @@ client.on("interactionCreate", async interaction => {
         ensurePlayer(interaction.user.id);
 
         const result = joinQueue(interaction.user.id);
-
         if (result?.error) {
             return interaction.reply({
                 content: result.error,
@@ -120,10 +110,6 @@ client.on("interactionCreate", async interaction => {
         }
 
         const queue = getQueue();
-
-        // ============================
-        // MATCH FOUND
-        // ============================
 
         if (queue.length === 6) {
 
@@ -146,23 +132,40 @@ client.on("interactionCreate", async interaction => {
                 embeds: [matchEmbed]
             });
 
-            // 🔊 CREATE LOBBY VOICE
             const lobbyVoice = await interaction.guild.channels.create({
                 name: "LOBBY 3V3 DRAFT",
                 type: 2
             });
 
             await interaction.channel.send(
-                "All players must join **LOBBY 3V3 DRAFT** to start the draft."
+                "All players must join **LOBBY 3V3 DRAFT** within 240 seconds."
             );
 
-            // Store draft globally
             global.currentDraft = {
                 team1,
                 team2,
                 lobbyVoiceId: lobbyVoice.id,
                 textChannelId: interaction.channel.id
             };
+
+            // ⏳ Auto disband after 240 sec
+            global.currentDraft.timeout = setTimeout(async () => {
+
+                if (!global.currentDraft) return;
+
+                const guild = interaction.guild;
+                const lobby = guild.channels.cache.get(global.currentDraft.lobbyVoiceId);
+
+                if (lobby) await lobby.delete().catch(() => {});
+
+                const textChannel = guild.channels.cache.get(global.currentDraft.textChannelId);
+                if (textChannel) {
+                    textChannel.send("❌ Lobby disbanded. Not all players joined in time.");
+                }
+
+                global.currentDraft = null;
+
+            }, 240000);
 
             resetQueue();
 
@@ -179,9 +182,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (interaction.customId === "leave") {
-
         leaveQueue(interaction.user.id);
-
         return interaction.update({
             embeds: [createQueueEmbed()],
             components: [createQueueButtons()]
@@ -199,7 +200,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
     const draft = global.currentDraft;
     const lobbyVoice = newState.guild.channels.cache.get(draft.lobbyVoiceId);
-
     if (!lobbyVoice) return;
 
     const allPlayers = [
@@ -213,6 +213,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
     if (playersInLobby.size === 6) {
 
+        if (draft.timeout) clearTimeout(draft.timeout);
+
         const team1Voice = await newState.guild.channels.create({
             name: "TEAM 1",
             type: 2
@@ -223,28 +225,25 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
             type: 2
         });
 
-        // Move players
-        for (const playerId of draft.team1.map(p => p.id)) {
-            const member = await newState.guild.members.fetch(playerId);
+        for (const id of draft.team1.map(p => p.id)) {
+            const member = await newState.guild.members.fetch(id);
             if (member.voice.channel) {
                 await member.voice.setChannel(team1Voice);
             }
         }
 
-        for (const playerId of draft.team2.map(p => p.id)) {
-            const member = await newState.guild.members.fetch(playerId);
+        for (const id of draft.team2.map(p => p.id)) {
+            const member = await newState.guild.members.fetch(id);
             if (member.voice.channel) {
                 await member.voice.setChannel(team2Voice);
             }
         }
 
         const textChannel = newState.guild.channels.cache.get(draft.textChannelId);
-
         if (textChannel) {
-            textChannel.send("🔥 All players connected. Draft will start.");
+            textChannel.send("🔥 All players connected. Draft phase starting...");
         }
 
-        // Prevent duplicate triggers
         global.currentDraft = null;
     }
 });
