@@ -148,7 +148,7 @@ client.on("interactionCreate", async interaction => {
             // DRAFT PHASE 1 TRIGGER
             // ============================
 
-            if (isQueueFull()) {
+            if (getQueue().length >= 2) {
 
                 const queue = getQueue();
                 const draft = startDraft(queue);
