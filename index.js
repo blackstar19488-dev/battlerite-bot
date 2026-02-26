@@ -115,55 +115,44 @@ client.on("interactionCreate", async interaction => {
     if (interaction.isButton()) {
 
         // JOIN BUTTON
-        if (interaction.customId === "join") {
+       if (interaction.customId === "join") {
 
-            const stats = getStats(interaction.user.id);
+    const stats = getStats(interaction.user.id);
 
-            // If player never registered IGN
-            if (!stats) {
+    if (!stats) {
+        const modal = new ModalBuilder()
+            .setCustomId("ignModal")
+            .setTitle("Enter your In Game Name");
 
-                const modal = new ModalBuilder()
-                    .setCustomId("ignModal")
-                    .setTitle("Enter your In Game Name");
+        const ignInput = new TextInputBuilder()
+            .setCustomId("ignInput")
+            .setLabel("Your Battlerite IGN")
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true);
 
-                const ignInput = new TextInputBuilder()
-                    .setCustomId("ignInput")
-                    .setLabel("Your Battlerite IGN")
-                    .setStyle(TextInputStyle.Short)
-                    .setRequired(true);
+        const row = new ActionRowBuilder().addComponents(ignInput);
+        modal.addComponents(row);
 
-                const row = new ActionRowBuilder().addComponents(ignInput);
-                modal.addComponents(row);
+        return interaction.showModal(modal);
+    }
 
-                return await interaction.showModal(modal);
-            }
+    const result = joinQueue(interaction.user, stats.ign);
 
-            const result = joinQueue(interaction.user, stats.ign);
+    if (result.error) {
+        return interaction.reply({ content: result.error, ephemeral: true });
+    }
 
-            if (result.error) {
-                return interaction.reply({ content: result.error, ephemeral: true });
-            }
+    await interaction.update({
+        embeds: [createQueueEmbed()],
+        components: [createQueueButtons()]
+    });
 
-            await interaction.update({
-                embeds: [createQueueEmbed()],
-                components: [createQueueButtons()]
-            });
-
-            // Match ready trigger placeholder
-            if (isQueueFull()) {
-                interaction.channel.send("⚔️ 6 Players reached. Draft system will trigger here.");
-            }
-        }
-
-        // LEAVE BUTTON
-        if (interaction.customId === "leave") {
-            leaveQueue(interaction.user.id);
-
-            await interaction.update({
-                embeds: [createQueueEmbed()],
-                components: [createQueueButtons()]
-            });
-        }
+    if (isQueueFull()) {
+        interaction.followUp({
+            content: "⚔️ 6 Players reached. Draft system will trigger here.",
+        });
+    }
+}
 
         // LEADERBOARD
         if (interaction.customId === "leaderboard") {
