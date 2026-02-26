@@ -50,6 +50,10 @@ const client = new Client({
     ]
 });
 
+client.on("ready", () => {
+    console.log("BOT READY");
+});
+
 // ============================
 // QUEUE CLEANER
 // ============================
@@ -175,7 +179,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     // ============================
-    // NORMAL BUTTONS
+    // JOIN / LEAVE
     // ============================
 
     if (interaction.isButton()) {
@@ -201,9 +205,9 @@ client.on("interactionCreate", async interaction => {
                 return interaction.showModal(modal);
             }
 
-            const result = joinQueue(interaction.user, stats.ign);
+            const result = joinQueue(interaction.user.id, stats.ign);
 
-            if (result.error) {
+            if (result?.error) {
                 return interaction.reply({ content: result.error, ephemeral: true });
             }
 
@@ -256,7 +260,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     // ============================
-    // IGN MODAL
+    // IGN MODAL FIXED
     // ============================
 
     if (interaction.isModalSubmit()) {
@@ -266,7 +270,7 @@ client.on("interactionCreate", async interaction => {
             const ign = interaction.fields.getTextInputValue("ignInput");
 
             ensurePlayer(interaction.user.id, ign);
-            joinQueue(interaction.user, ign);
+            joinQueue(interaction.user.id, ign);
 
             await interaction.reply({
                 content: `Registered as **${ign}** and joined the queue.`,
