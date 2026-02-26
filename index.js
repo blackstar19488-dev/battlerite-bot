@@ -25,6 +25,8 @@ const {
     getAllStats
 } = require("./systems/eloSystem");
 
+const { startDraft } = require("./systems/draftEngine");
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -34,7 +36,6 @@ const client = new Client({
     ]
 });
 
-
 // ============================
 // QUEUE CLEANER (1h timeout)
 // ============================
@@ -42,7 +43,6 @@ const client = new Client({
 setInterval(() => {
     checkQueueExpiration();
 }, 5 * 60 * 1000);
-
 
 // ============================
 // EMBEDS
@@ -91,7 +91,6 @@ function createLeaderboardEmbed() {
         .setColor(0xFFD700);
 }
 
-
 // ============================
 // !queue COMMAND
 // ============================
@@ -105,7 +104,6 @@ client.on("messageCreate", async message => {
     }
 });
 
-
 // ============================
 // INTERACTIONS
 // ============================
@@ -114,47 +112,77 @@ client.on("interactionCreate", async interaction => {
 
     if (interaction.isButton()) {
 
-        // JOIN BUTTON
-       if (interaction.customId === "join") {
+        if (interaction.customId === "join") {
 
-    const stats = getStats(interaction.user.id);
+            const stats = getStats(interaction.user.id);
 
-    if (!stats) {
-        const modal = new ModalBuilder()
-            .setCustomId("ignModal")
-            .setTitle("Enter your In Game Name");
+            if (!stats) {
+                const modal = new ModalBuilder()
+                    .setCustomId("ignModal")
+                    .setTitle("Enter your In Game Name");
 
-        const ignInput = new TextInputBuilder()
-            .setCustomId("ignInput")
-            .setLabel("Your Battlerite IGN")
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true);
+                const ignInput = new TextInputBuilder()
+                    .setCustomId("ignInput")
+                    .setLabel("Your Battlerite IGN")
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
 
-        const row = new ActionRowBuilder().addComponents(ignInput);
-        modal.addComponents(row);
+                const row = new ActionRowBuilder().addComponents(ignInput);
+                modal.addComponents(row);
 
-        return interaction.showModal(modal);
-    }
+                return interaction.showModal(modal);
+            }
 
-    const result = joinQueue(interaction.user, stats.ign);
+            const result = joinQueue(interaction.user, stats.ign);
 
-    if (result.error) {
-        return interaction.reply({ content: result.error, ephemeral: true });
-    }
+            if (result.error) {
+                return interaction.reply({ content: result.error, ephemeral: true });
+            }
 
-    await interaction.update({
-        embeds: [createQueueEmbed()],
-        components: [createQueueButtons()]
-    });
+            await interaction.update({
+                embeds: [createQueueEmbed()],
+                components: [createQueueButtons()]
+            });
 
-    if (isQueueFull()) {
-        interaction.followUp({
-            content: "⚔️ 6 Players reached. Draft system will trigger here.",
-        });
-    }
-}
+            // ============================
+            // DRAFT PHASE 1 TRIGGER
+            // ============================
 
-        // LEADERBOARD
+            if (isQueueFull()) {
+
+                const queue = getQueue();
+                const draft = startDraft(queue);
+
+                const formatTeam = (team, captain) =>
+                    team.map(id => {
+                        const s = getStats(id);
+                        const crown = id === captain ? " 👑" : "";
+                        return `${s.ign}${crown} — ELO: ${s.elo}`;
+                    }).join("\n");
+
+                interaction.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setTitle("⚔️ 3v3 Draft Ready")
+                            .setColor(0x00ff00)
+                            .setDescription(
+                                `**Team 1**\n${formatTeam(draft.team1, draft.captain1)}\n\n` +
+                                `**Team 2**\n${formatTeam(draft.team2, draft.captain2)}`
+                            )
+                    ]
+                });
+            }
+        }
+
+        if (interaction.customId === "leave") {
+            leaveQueue(interaction.user.id);
+
+            await interaction.update({
+                embeds: [createQueueEmbed()],
+                components: [createQueueButtons()]
+            });
+        }
+
         if (interaction.customId === "leaderboard") {
             await interaction.reply({
                 embeds: [createLeaderboardEmbed()],
@@ -163,7 +191,6 @@ client.on("interactionCreate", async interaction => {
         }
     }
 
-    // IGN MODAL SUBMIT
     if (interaction.isModalSubmit()) {
 
         if (interaction.customId === "ignModal") {
@@ -181,6 +208,5 @@ client.on("interactionCreate", async interaction => {
         }
     }
 });
-
 
 client.login(process.env.TOKEN);
