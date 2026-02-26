@@ -1,12 +1,20 @@
 const fs = require("fs");
+const path = require("path");
 
-const FILE_PATH = "./data/stats.json";
+const DATA_FOLDER = path.join(__dirname, "../data");
+const FILE_PATH = path.join(DATA_FOLDER, "stats.json");
 
-let stats = {};
-
-if (fs.existsSync(FILE_PATH)) {
-    stats = JSON.parse(fs.readFileSync(FILE_PATH));
+// Create data folder if it doesn't exist
+if (!fs.existsSync(DATA_FOLDER)) {
+    fs.mkdirSync(DATA_FOLDER);
 }
+
+// Create stats.json if it doesn't exist
+if (!fs.existsSync(FILE_PATH)) {
+    fs.writeFileSync(FILE_PATH, JSON.stringify({}, null, 2));
+}
+
+let stats = JSON.parse(fs.readFileSync(FILE_PATH));
 
 function save() {
     fs.writeFileSync(FILE_PATH, JSON.stringify(stats, null, 2));
