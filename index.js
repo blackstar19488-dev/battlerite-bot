@@ -27,17 +27,22 @@ const {
 
 const { startDraft } = require("./systems/draftEngine");
 
+const {
+    createLobbyVoice
+} = require("./systems/voiceManager");
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMembers
     ]
 });
 
 // ============================
-// QUEUE CLEANER (1h timeout)
+// QUEUE CLEANER
 // ============================
 
 setInterval(() => {
@@ -73,26 +78,8 @@ function createQueueButtons() {
     );
 }
 
-function createLeaderboardEmbed() {
-    const stats = getAllStats();
-    const sorted = Object.keys(stats)
-        .sort((a, b) => stats[b].elo - stats[a].elo);
-
-    const description = sorted.length === 0
-        ? "No players yet."
-        : sorted.map((id, i) => {
-            const s = stats[id];
-            return `#${i + 1} | ${s.ign} 🏆 ELO: ${s.elo} | W:${s.wins} L:${s.losses}`;
-        }).join("\n──────────────\n");
-
-    return new EmbedBuilder()
-        .setTitle("📊 Battlerite Leaderboard")
-        .setDescription(description)
-        .setColor(0xFFD700);
-}
-
 // ============================
-// !queue COMMAND
+// COMMAND
 // ============================
 
 client.on("messageCreate", async message => {
@@ -145,10 +132,10 @@ client.on("interactionCreate", async interaction => {
             });
 
             // ============================
-            // DRAFT PHASE 1 TRIGGER
+            // DRAFT TRIGGER
             // ============================
 
-            if (getQueue().length >= 2) {
+            if (isQueueFull()) {
 
                 const queue = getQueue();
                 const draft = startDraft(queue);
@@ -160,7 +147,14 @@ client.on("interactionCreate", async interaction => {
                         return `${s.ign}${crown} — ELO: ${s.elo}`;
                     }).join("\n");
 
+                // Create Lobby Voice
+                const lobbyVoice = await createLobbyVoice(interaction.guild);
+
+                // Ping players
+                const mentions = queue.map(id => `<@${id}>`).join(" ");
+
                 interaction.channel.send({
+                    content: `⚔️ MATCH FOUND\n${mentions}\nJoin **LOBBY 3V3 DRAFT** to start.`,
                     embeds: [
                         new EmbedBuilder()
                             .setTitle("⚔️ 3v3 Draft Ready")
@@ -171,6 +165,8 @@ client.on("interactionCreate", async interaction => {
                             )
                     ]
                 });
+
+                resetQueue();
             }
         }
 
@@ -184,8 +180,22 @@ client.on("interactionCreate", async interaction => {
         }
 
         if (interaction.customId === "leaderboard") {
+            const stats = getAllStats();
+            const sorted = Object.keys(stats)
+                .sort((a, b) => stats[b].elo - stats[a].elo);
+
+            const description = sorted.map((id, i) => {
+                const s = stats[id];
+                return `#${i + 1} | ${s.ign} 🏆 ELO: ${s.elo} | W:${s.wins} L:${s.losses}`;
+            }).join("\n──────────────\n");
+
             await interaction.reply({
-                embeds: [createLeaderboardEmbed()],
+                embeds: [
+                    new EmbedBuilder()
+                        .setTitle("📊 Battlerite Leaderboard")
+                        .setDescription(description || "No players yet.")
+                        .setColor(0xFFD700)
+                ],
                 ephemeral: true
             });
         }
@@ -198,7 +208,6 @@ client.on("interactionCreate", async interaction => {
             const ign = interaction.fields.getTextInputValue("ignInput");
 
             ensurePlayer(interaction.user.id, ign);
-
             joinQueue(interaction.user, ign);
 
             await interaction.reply({
