@@ -1,8 +1,35 @@
 const { getStats } = require("./eloSystem");
 
+// ============================
+// CHAMPIONS LIST
+// ============================
+
+const champions = {
+    melee: [
+        "Bakko","Croak","Freya","Jamila",
+        "Raigon","Rook","Ruh'kaan","Shifu Thorn"
+    ],
+    range: [
+        "Alysia","Ashka","Destiny","Ezmo",
+        "Iva","Jade","Jumong","Shen Rao",
+        "Taya","Varesh"
+    ],
+    support: [
+        "Blossom","Lucie","Oldur","Peal",
+        "Pestilus","Poloma","Sirius","Ulric","Zander"
+    ]
+};
+
+let bannedChampions = [];
 let currentDraft = null;
 
+// ============================
+// TEAM BALANCING
+// ============================
+
 function averageElo(team) {
+    if (team.length === 0) return 1000;
+
     return team.reduce((sum, id) => {
         const stats = getStats(id);
         return sum + (stats?.elo || 1000);
@@ -34,6 +61,10 @@ function getCaptain(team) {
     })[0];
 }
 
+// ============================
+// DRAFT START
+// ============================
+
 function startDraft(players) {
 
     const [team1, team2] = makeBalancedTeams(players);
@@ -46,8 +77,10 @@ function startDraft(players) {
         team2,
         captain1,
         captain2,
-        phase: "waiting"
+        phase: "ban-phase"
     };
+
+    bannedChampions = [];
 
     return currentDraft;
 }
@@ -58,10 +91,41 @@ function getCurrentDraft() {
 
 function resetDraft() {
     currentDraft = null;
+    bannedChampions = [];
 }
+
+// ============================
+// BAN SYSTEM
+// ============================
+
+function getChampions() {
+    return champions;
+}
+
+function banChampion(name) {
+    if (!bannedChampions.includes(name)) {
+        bannedChampions.push(name);
+    }
+}
+
+function getBannedChampions() {
+    return bannedChampions;
+}
+
+function resetBans() {
+    bannedChampions = [];
+}
+
+// ============================
+// EXPORTS
+// ============================
 
 module.exports = {
     startDraft,
     getCurrentDraft,
-    resetDraft
+    resetDraft,
+    getChampions,
+    banChampion,
+    getBannedChampions,
+    resetBans
 };

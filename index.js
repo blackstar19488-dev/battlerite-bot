@@ -25,10 +25,19 @@ const {
     getAllStats
 } = require("./systems/eloSystem");
 
-const { startDraft } = require("./systems/draftEngine");
+const {
+    startDraft,
+    getCurrentDraft,
+    getChampions,
+    banChampion,
+    getBannedChampions
+} = require("./systems/draftEngine");
 
 const {
-    createLobbyVoice
+    createLobbyVoice,
+    createTeamVoices,
+    movePlayersToTeams,
+    getLobbyChannel
 } = require("./systems/voiceManager");
 
 const client = new Client({
@@ -73,9 +82,49 @@ function createQueueEmbed() {
 function createQueueButtons() {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("join").setLabel("Join").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId("leave").setLabel("Leave").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId("leaderboard").setLabel("Leaderboard").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("leave").setLabel("Leave").setStyle(ButtonStyle.Danger)
     );
+}
+
+// ============================
+// BAN BUTTONS
+// ============================
+
+function createBanButtons() {
+
+    const champions = getChampions();
+    const banned = getBannedChampions();
+
+    const rows = [];
+    const allChampions = [
+        ...champions.melee,
+        ...champions.range,
+        ...champions.support
+    ];
+
+    let currentRow = new ActionRowBuilder();
+
+    allChampions.forEach(champ => {
+
+        if (currentRow.components.length === 5) {
+            rows.push(currentRow);
+            currentRow = new ActionRowBuilder();
+        }
+
+        currentRow.addComponents(
+            new ButtonBuilder()
+                .setCustomId(`ban_${champ}`)
+                .setLabel(champ)
+                .setStyle(ButtonStyle.Danger)
+                .setDisabled(banned.includes(champ))
+        );
+    });
+
+    if (currentRow.components.length > 0) {
+        rows.push(currentRow);
+    }
+
+    return rows;
 }
 
 // ============================
@@ -96,6 +145,38 @@ client.on("messageCreate", async message => {
 // ============================
 
 client.on("interactionCreate", async interaction => {
+
+    // ============================
+    // BAN CLICK
+    // ============================
+
+    if (interaction.isButton() && interaction.customId.startsWith("ban_")) {
+
+        const draft = getCurrentDraft();
+        if (!draft) return;
+
+        const champion = interaction.customId.replace("ban_", "");
+
+        if (interaction.user.id !== draft.captain1) {
+            return interaction.reply({
+                content: "Only the Team 1 Captain can ban.",
+                ephemeral: true
+            });
+        }
+
+        banChampion(champion);
+
+        await interaction.update({
+            content: `❌ ${champion} has been banned.`,
+            components: createBanButtons()
+        });
+
+        return;
+    }
+
+    // ============================
+    // NORMAL BUTTONS
+    // ============================
 
     if (interaction.isButton()) {
 
@@ -131,10 +212,6 @@ client.on("interactionCreate", async interaction => {
                 components: [createQueueButtons()]
             });
 
-            // ============================
-            // DRAFT TRIGGER
-            // ============================
-
             if (isQueueFull()) {
 
                 const queue = getQueue();
@@ -147,13 +224,11 @@ client.on("interactionCreate", async interaction => {
                         return `${s.ign}${crown} — ELO: ${s.elo}`;
                     }).join("\n");
 
-                // Create Lobby Voice
-                const lobbyVoice = await createLobbyVoice(interaction.guild);
+                await createLobbyVoice(interaction.guild);
 
-                // Ping players
                 const mentions = queue.map(id => `<@${id}>`).join(" ");
 
-                interaction.channel.send({
+                await interaction.channel.send({
                     content: `⚔️ MATCH FOUND\n${mentions}\nJoin **LOBBY 3V3 DRAFT** to start.`,
                     embeds: [
                         new EmbedBuilder()
@@ -178,28 +253,11 @@ client.on("interactionCreate", async interaction => {
                 components: [createQueueButtons()]
             });
         }
-
-        if (interaction.customId === "leaderboard") {
-            const stats = getAllStats();
-            const sorted = Object.keys(stats)
-                .sort((a, b) => stats[b].elo - stats[a].elo);
-
-            const description = sorted.map((id, i) => {
-                const s = stats[id];
-                return `#${i + 1} | ${s.ign} 🏆 ELO: ${s.elo} | W:${s.wins} L:${s.losses}`;
-            }).join("\n──────────────\n");
-
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setTitle("📊 Battlerite Leaderboard")
-                        .setDescription(description || "No players yet.")
-                        .setColor(0xFFD700)
-                ],
-                ephemeral: true
-            });
-        }
     }
+
+    // ============================
+    // IGN MODAL
+    // ============================
 
     if (interaction.isModalSubmit()) {
 
@@ -213,6 +271,38 @@ client.on("interactionCreate", async interaction => {
             await interaction.reply({
                 content: `Registered as **${ign}** and joined the queue.`,
                 ephemeral: true
+            });
+        }
+    }
+});
+
+// ============================
+// VOICE LISTENER
+// ============================
+
+client.on("voiceStateUpdate", async (oldState, newState) => {
+
+    const draft = getCurrentDraft();
+    if (!draft) return;
+
+    const lobby = getLobbyChannel();
+    if (!lobby) return;
+
+    const playersInLobby = lobby.members.filter(member =>
+        draft.team1.includes(member.id) || draft.team2.includes(member.id)
+    );
+
+    if (playersInLobby.size === 6) {
+
+        await createTeamVoices(newState.guild);
+        await movePlayersToTeams(newState.guild, draft);
+
+        const draftChannel = newState.guild.systemChannel;
+
+        if (draftChannel) {
+            draftChannel.send({
+                content: "🔴 BAN PHASE\nTeam 1 Captain must ban a champion.",
+                components: createBanButtons()
             });
         }
     }
