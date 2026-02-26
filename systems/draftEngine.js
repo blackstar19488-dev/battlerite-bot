@@ -1,131 +1,145 @@
+// COMPETITIVE DRAFT ENGINE
+
 const { getStats } = require("./eloSystem");
 
-// ============================
-// CHAMPIONS LIST
-// ============================
+const champions = [
+    "Bakko","Croak","Freya","Jamila","Raigon","Rook","Ruh'kaan","Shifu Thorn",
+    "Alysia","Ashka","Destiny","Ezmo","Iva","Jade","Jumong","Shen Rao","Taya","Varesh",
+    "Blossom","Lucie","Oldur","Peal","Pestilus","Poloma","Sirius","Ulric","Zander"
+];
 
-const champions = {
-    melee: [
-        "Bakko","Croak","Freya","Jamila",
-        "Raigon","Rook","Ruh'kaan","Shifu Thorn"
-    ],
-    range: [
-        "Alysia","Ashka","Destiny","Ezmo",
-        "Iva","Jade","Jumong","Shen Rao",
-        "Taya","Varesh"
-    ],
-    support: [
-        "Blossom","Lucie","Oldur","Peal",
-        "Pestilus","Poloma","Sirius","Ulric","Zander"
-    ]
-};
+let draft = null;
 
-let bannedChampions = [];
-let currentDraft = null;
-
-// ============================
-// TEAM BALANCING
-// ============================
-
-function averageElo(team) {
-    if (team.length === 0) return 1000;
-
-    return team.reduce((sum, id) => {
-        const stats = getStats(id);
-        return sum + (stats?.elo || 1000);
-    }, 0) / team.length;
-}
+/* ======================
+   TEAM BALANCE
+====================== */
 
 function makeBalancedTeams(players) {
-    const sorted = [...players].sort((a, b) => {
-        return (getStats(b)?.elo || 1000) - (getStats(a)?.elo || 1000);
-    });
-
+    const sorted = [...players].sort((a,b)=> (getStats(b)?.elo||1000)-(getStats(a)?.elo||1000));
     const team1 = [];
     const team2 = [];
 
-    sorted.forEach(player => {
-        if (averageElo(team1) <= averageElo(team2)) {
-            team1.push(player);
-        } else {
-            team2.push(player);
-        }
+    sorted.forEach((p,i)=>{
+        if(i%2===0) team1.push(p);
+        else team2.push(p);
     });
 
-    return [team1, team2];
+    return [team1,team2];
 }
 
-function getCaptain(team) {
-    return team.sort((a, b) => {
-        return (getStats(b)?.elo || 1000) - (getStats(a)?.elo || 1000);
-    })[0];
+function getCaptain(team){
+    return team.sort((a,b)=> (getStats(b)?.elo||1000)-(getStats(a)?.elo||1000))[0];
 }
 
-// ============================
-// DRAFT START
-// ============================
+/* ======================
+   START DRAFT
+====================== */
 
-function startDraft(players) {
+function startDraft(players){
 
-    const [team1, team2] = makeBalancedTeams(players);
+    const [team1,team2] = makeBalancedTeams(players);
 
     const captain1 = getCaptain(team1);
     const captain2 = getCaptain(team2);
 
-    currentDraft = {
+    draft = {
         team1,
         team2,
         captain1,
         captain2,
-        phase: "ban-phase"
+        bans:[],
+        picks:{},
+        phase:"ban1",
+        turn: captain1
     };
 
-    bannedChampions = [];
-
-    return currentDraft;
+    return draft;
 }
 
-function getCurrentDraft() {
-    return currentDraft;
+function getDraft(){
+    return draft;
 }
 
-function resetDraft() {
-    currentDraft = null;
-    bannedChampions = [];
+function resetDraft(){
+    draft=null;
 }
 
-// ============================
-// BAN SYSTEM
-// ============================
+/* ======================
+   DRAFT FLOW
+====================== */
 
-function getChampions() {
-    return champions;
+function getAvailableChampions(){
+    if(!draft) return [];
+    return champions.filter(c => 
+        !draft.bans.includes(c) && !draft.picks[c]
+    );
 }
 
-function banChampion(name) {
-    if (!bannedChampions.includes(name)) {
-        bannedChampions.push(name);
+function banChampion(champ){
+    if(!draft) return;
+    draft.bans.push(champ);
+}
+
+function pickChampion(champ){
+    if(!draft) return;
+    draft.picks[champ]=draft.turn;
+}
+
+function nextPhase(){
+
+    if(!draft) return;
+
+    switch(draft.phase){
+
+        case "ban1":
+            draft.phase="ban2";
+            draft.turn=draft.captain2;
+            break;
+
+        case "ban2":
+            draft.phase="pick1";
+            draft.turn=draft.captain1;
+            break;
+
+        case "pick1":
+            draft.phase="pick2a";
+            draft.turn=draft.captain2;
+            break;
+
+        case "pick2a":
+            draft.phase="pick2b";
+            draft.turn=draft.captain2;
+            break;
+
+        case "pick2b":
+            draft.phase="pick3a";
+            draft.turn=draft.captain1;
+            break;
+
+        case "pick3a":
+            draft.phase="pick3b";
+            draft.turn=draft.captain1;
+            break;
+
+        case "pick3b":
+            draft.phase="pick4";
+            draft.turn=draft.captain2;
+            break;
+
+        case "pick4":
+            draft.phase="finished";
+            break;
     }
-}
 
-function getBannedChampions() {
-    return bannedChampions;
+    return draft.phase;
 }
-
-function resetBans() {
-    bannedChampions = [];
-}
-
-// ============================
-// EXPORTS
-// ============================
 
 module.exports = {
     startDraft,
-    getCurrentDraft,
+    getDraft,
     resetDraft,
-    getChampions,
+    getAvailableChampions,
     banChampion,
-    getBannedChampions,
-    resetBans
+    pickChampion,
+    nextPhase
 };
