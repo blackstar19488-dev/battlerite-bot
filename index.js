@@ -1,204 +1,361 @@
+
 process.on("unhandledRejection", console.error);
 process.on("uncaughtException", console.error);
 
 const {
-  Client,
-  GatewayIntentBits,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle
+    Client,
+    GatewayIntentBits,
+    EmbedBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ChannelType,
+    PermissionFlagsBits
 } = require("discord.js");
 
 const fs = require("fs");
 
+/* ================= CLIENT ================= */
+
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildVoiceStates
+    ]
 });
 
 client.once("ready", () => {
-  console.log("BOT READY");
+    console.log("🔥 FULL DRAFT SYSTEM READY");
 });
 
-/* ==========================
-   DATA
-========================== */
+/* ================= DATA ================= */
 
 let queue = [];
 
 let stats = fs.existsSync("./stats.json")
-  ? JSON.parse(fs.readFileSync("./stats.json"))
-  : {};
+    ? JSON.parse(fs.readFileSync("./stats.json"))
+    : {};
 
-function saveStats() {
-  fs.writeFileSync("./stats.json", JSON.stringify(stats, null, 2));
+function saveStats(){
+    fs.writeFileSync("./stats.json", JSON.stringify(stats, null, 2));
 }
 
-function ensurePlayer(id) {
-  if (!stats[id]) {
-    stats[id] = { elo: 1000, wins: 0, losses: 0 };
-    saveStats();
-  }
+function ensurePlayer(id){
+    if(!stats[id]){
+        stats[id] = { elo:1000, wins:0, losses:0 };
+        saveStats();
+    }
 }
 
-/* ==========================
-   TEAM BALANCE
-========================== */
+/* ================= CHAMPIONS ================= */
 
-function createBalancedTeams(players) {
-  const sorted = [...players].sort(
-    (a, b) => (stats[b]?.elo || 1000) - (stats[a]?.elo || 1000)
-  );
+const ALL_CHAMPIONS = [
+"Alysia","Ashka","Bakko","Blossom","Croak","Destiny","Ezmo",
+"Freya","Iva","Jade","Jamila","Jumong","Lucie","Oldur","Pearl",
+"Pestilus","Poloma","Raigon","Rook","Ruh Kaan","Shen Rao",
+"Shifu","Sirius","Taya","Thorn","Ulric","Varesh"
+];
 
-  const team1 = [];
-  const team2 = [];
+/* ================= MATCH STATE ================= */
 
-  sorted.forEach((id, i) => {
-    if (i % 2 === 0) team1.push(id);
-    else team2.push(id);
-  });
+let match = resetMatch();
 
-  function pickCaptain(team) {
-    const max = Math.max(...team.map(id => stats[id]?.elo || 1000));
-    const candidates = team.filter(id => (stats[id]?.elo || 1000) === max);
-    return candidates[Math.floor(Math.random() * candidates.length)];
-  }
-
-  return {
-    team1,
-    team2,
-    captain1: pickCaptain(team1),
-    captain2: pickCaptain(team2)
-  };
+function resetMatch(){
+    return {
+        active:false,
+        phase:null,
+        teamA:[],
+        teamB:[],
+        captainA:null,
+        captainB:null,
+        available:[...ALL_CHAMPIONS],
+        picks:{},
+        turn:null,
+        timeout:null,
+        voiceCategory:null,
+        voiceA:null,
+        voiceB:null,
+        channel:null
+    };
 }
 
-/* ==========================
-   EMBED
-========================== */
+/* ================= QUEUE ================= */
 
-function buildQueueEmbed() {
-  return new EmbedBuilder()
-    .setTitle("🔥 Battlerite 3v3 Queue")
-    .setDescription(
-      queue.length === 0
-        ? "Queue is empty."
-        : queue
-            .map(
-              (id, i) =>
-                `#${i + 1} | <@${id}> 🏆 ELO: ${stats[id]?.elo || 1000}`
-            )
-            .join("\n")
-    )
-    .setFooter({ text: `Queue ${queue.length}/6` })
-    .setColor(0xff0000);
+function buildQueueEmbed(){
+    return new EmbedBuilder()
+        .setTitle("🔥 Battlerite 3v3 Queue")
+        .setColor(0xFF0000)
+        .setDescription(
+            queue.length===0
+            ? "Queue empty."
+            : queue.map((id,i)=>`#${i+1} <@${id}> | ELO: ${stats[id]?.elo||1000}`).join("\n")
+        )
+        .setFooter({text:`${queue.length}/6`});
 }
 
-function buildButtons() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("join")
-      .setLabel("Join")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId("leave")
-      .setLabel("Leave")
-      .setStyle(ButtonStyle.Danger)
-  );
+function buildQueueButtons(){
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("join").setLabel("Join").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("leave").setLabel("Leave").setStyle(ButtonStyle.Danger)
+    );
 }
 
-/* ==========================
-   COMMAND
-========================== */
-
-client.on("messageCreate", async message => {
-  if (message.content === "!queue") {
-    await message.channel.send({
-      embeds: [buildQueueEmbed()],
-      components: [buildButtons()]
-    });
-  }
+client.on("messageCreate", async msg=>{
+    if(msg.author.bot) return;
+    if(msg.content==="!queue"){
+        await msg.channel.send({
+            embeds:[buildQueueEmbed()],
+            components:[buildQueueButtons()]
+        });
+    }
 });
 
-/* ==========================
-   SINGLE INTERACTION HANDLER
-========================== */
+/* ================= TEAM BALANCE ================= */
 
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isButton()) return;
+function balance(players){
+    const sorted=[...players].sort((a,b)=>stats[b].elo-stats[a].elo);
+    const A=[],B=[];
+    sorted.forEach((id,i)=> i%2===0?A.push(id):B.push(id));
+    return {A,B};
+}
 
-  /* JOIN */
-  if (interaction.customId === "join") {
-    ensurePlayer(interaction.user.id);
+/* ================= INTERACTIONS ================= */
 
-    if (queue.includes(interaction.user.id)) {
-      return interaction.reply({
-        content: "Already in queue.",
-        ephemeral: true
-      });
+client.on("interactionCreate", async interaction=>{
+
+    if(!interaction.isButton()) return;
+
+    /* ===== QUEUE ===== */
+
+    if(interaction.customId==="join"){
+        if(match.active) return interaction.reply({content:"Match running.",ephemeral:true});
+        ensurePlayer(interaction.user.id);
+        if(queue.includes(interaction.user.id))
+            return interaction.reply({content:"Already queued.",ephemeral:true});
+        if(queue.length>=6)
+            return interaction.reply({content:"Queue full.",ephemeral:true});
+
+        queue.push(interaction.user.id);
+
+        await interaction.update({
+            embeds:[buildQueueEmbed()],
+            components:[buildQueueButtons()]
+        });
+
+        if(queue.length===6){
+            startMatch(queue, interaction.channel);
+            queue=[];
+        }
     }
 
-    if (queue.length >= 6) {
-      return interaction.reply({
-        content: "Queue full.",
-        ephemeral: true
-      });
+    if(interaction.customId==="leave"){
+        queue=queue.filter(id=>id!==interaction.user.id);
+        await interaction.update({
+            embeds:[buildQueueEmbed()],
+            components:[buildQueueButtons()]
+        });
     }
 
-    queue.push(interaction.user.id);
+    /* ===== DRAFT BUTTONS ===== */
 
-    await interaction.update({
-      embeds: [buildQueueEmbed()],
-      components: [buildButtons()]
-    });
+    if(match.active && interaction.customId.startsWith("champ_")){
+        if(interaction.user.id!==match.turn)
+            return interaction.reply({content:"Not your turn.",ephemeral:true});
 
-    /* MATCH FOUND */
-    if (queue.length === 6) {
-      const { team1, team2, captain1, captain2 } =
-        createBalancedTeams(queue);
+        const champ=interaction.customId.replace("champ_","");
+        if(!match.available.includes(champ))
+            return interaction.reply({content:"Unavailable.",ephemeral:true});
 
-      const matchEmbed = new EmbedBuilder()
-        .setTitle("⚔️ MATCH FOUND ⚔️")
-        .setColor(0x00ff00)
+        clearTimeout(match.timeout);
+
+        match.available=match.available.filter(c=>c!==champ);
+
+        if(match.phase==="banA"){
+            await interaction.update({content:`🚫 Team A banned ${champ}`,components:[]});
+            match.phase="banB";
+            match.turn=match.captainB;
+            sendDraft();
+        }
+        else if(match.phase==="banB"){
+            await interaction.update({content:`🚫 Team B banned ${champ}`,components:[]});
+            match.phase="pick";
+            match.turn=match.teamA[0];
+            sendDraft();
+        }
+        else{
+            match.picks[interaction.user.id]=champ;
+            await interaction.update({content:`✅ <@${interaction.user.id}> picked ${champ}`,components:[]});
+            nextPick();
+        }
+    }
+
+    /* ===== VOTE ===== */
+
+    if(match.active && interaction.customId==="voteA"){
+        finishMatch("A");
+        await interaction.reply({content:"Team A wins!",ephemeral:true});
+    }
+
+    if(match.active && interaction.customId==="voteB"){
+        finishMatch("B");
+        await interaction.reply({content:"Team B wins!",ephemeral:true});
+    }
+});
+
+/* ================= START MATCH ================= */
+
+function startMatch(players, channel){
+
+    const {A,B}=balance(players);
+
+    match=resetMatch();
+    match.active=true;
+    match.phase="banA";
+    match.teamA=A;
+    match.teamB=B;
+    match.captainA=A[0];
+    match.captainB=B[0];
+    match.turn=match.captainA;
+    match.channel=channel;
+
+    channel.send(`⚔️ MATCH FOUND\nTeam A Captain: <@${A[0]}>\nTeam B Captain: <@${B[0]}>`);
+    sendDraft();
+}
+
+/* ================= DRAFT ================= */
+
+function sendDraft(){
+
+    const embed=new EmbedBuilder()
+        .setTitle("🎯 Draft Phase")
+        .setDescription(`Phase: ${match.phase}\nTurn: <@${match.turn}>`)
+        .setColor(0x00AEFF);
+
+    const rows=[];
+    for(let i=0;i<match.available.length;i+=5){
+        const row=new ActionRowBuilder();
+        match.available.slice(i,i+5).forEach(c=>{
+            row.addComponents(
+                new ButtonBuilder()
+                    .setCustomId("champ_"+c)
+                    .setLabel(c)
+                    .setStyle(ButtonStyle.Primary)
+            );
+        });
+        rows.push(row);
+    }
+
+    match.channel.send({embeds:[embed],components:rows});
+    startTimeout();
+}
+
+function startTimeout(){
+    match.timeout=setTimeout(()=>{
+        const random=match.available[Math.floor(Math.random()*match.available.length)];
+        match.channel.send("⏰ Auto select "+random);
+        match.available=match.available.filter(c=>c!==random);
+        nextPick();
+    },240000);
+}
+
+function nextPick(){
+
+    const order=[
+        ...match.teamA,
+        ...match.teamB
+    ];
+
+    const picked=Object.keys(match.picks).length;
+    if(picked>=6){
+        finishDraft();
+        return;
+    }
+
+    match.turn=order[picked];
+    sendDraft();
+}
+
+/* ================= FINISH DRAFT ================= */
+
+async function finishDraft(){
+
+    clearTimeout(match.timeout);
+
+    const embed=new EmbedBuilder()
+        .setTitle("⚔️ MATCH READY")
         .setDescription(
-          `**Team 1**\n${team1
-            .map(id => `<@${id}> ${id === captain1 ? "👑" : ""}`)
-            .join("\n")}\n\n` +
-            `**Team 2**\n${team2
-              .map(id => `<@${id}> ${id === captain2 ? "👑" : ""}`)
-              .join("\n")}`
+            "**Team A**\n"+match.teamA.map(id=>`<@${id}> → ${match.picks[id]||"?"}`).join("\n")+
+            "\n\n**Team B**\n"+match.teamB.map(id=>`<@${id}> → ${match.picks[id]||"?"}`).join("\n")
         );
 
-      await interaction.channel.send({
-        content: queue.map(id => `<@${id}>`).join(" "),
-        embeds: [matchEmbed]
-      });
+    await match.channel.send({embeds:[embed]});
+    await createVoice();
+    sendVote();
+}
 
-      queue = [];
+/* ================= VOICE ================= */
 
-      await interaction.message.edit({
-        embeds: [buildQueueEmbed()],
-        components: [buildButtons()]
-      });
-    }
+async function createVoice(){
 
-    return;
-  }
+    const guild=match.channel.guild;
 
-  /* LEAVE */
-  if (interaction.customId === "leave") {
-    queue = queue.filter(id => id !== interaction.user.id);
-
-    await interaction.update({
-      embeds: [buildQueueEmbed()],
-      components: [buildButtons()]
+    match.voiceCategory=await guild.channels.create({
+        name:"MATCH VOICE",
+        type:ChannelType.GuildCategory
     });
 
-    return;
-  }
-});
+    match.voiceA=await guild.channels.create({
+        name:"Team A",
+        type:ChannelType.GuildVoice,
+        parent:match.voiceCategory.id
+    });
+
+    match.voiceB=await guild.channels.create({
+        name:"Team B",
+        type:ChannelType.GuildVoice,
+        parent:match.voiceCategory.id
+    });
+}
+
+/* ================= VOTE ================= */
+
+function sendVote(){
+
+    const row=new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("voteA").setLabel("Team A Win").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("voteB").setLabel("Team B Win").setStyle(ButtonStyle.Danger)
+    );
+
+    match.channel.send({content:"Select winner:",components:[row]});
+}
+
+/* ================= FINISH MATCH ================= */
+
+async function finishMatch(winner){
+
+    const winners=winner==="A"?match.teamA:match.teamB;
+    const losers=winner==="A"?match.teamB:match.teamA;
+
+    winners.forEach(id=>{
+        stats[id].elo+=25;
+        stats[id].wins++;
+    });
+
+    losers.forEach(id=>{
+        stats[id].elo-=25;
+        stats[id].losses++;
+    });
+
+    saveStats();
+
+    await match.channel.send("🏆 ELO Updated (+25 / -25)");
+
+    if(match.voiceCategory) await match.voiceCategory.delete().catch(()=>{});
+
+    match=resetMatch();
+}
 
 client.login(process.env.TOKEN);
