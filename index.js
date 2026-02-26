@@ -24,9 +24,9 @@ client.once("ready", () => {
   console.log("BOT READY");
 });
 
-/* =======================
+/* ==========================
    DATA
-======================= */
+========================== */
 
 let queue = [];
 
@@ -45,9 +45,9 @@ function ensurePlayer(id) {
   }
 }
 
-/* =======================
+/* ==========================
    TEAM BALANCE
-======================= */
+========================== */
 
 function createBalancedTeams(players) {
   const sorted = [...players].sort(
@@ -76,9 +76,9 @@ function createBalancedTeams(players) {
   };
 }
 
-/* =======================
+/* ==========================
    EMBED
-======================= */
+========================== */
 
 function buildQueueEmbed() {
   return new EmbedBuilder()
@@ -89,7 +89,7 @@ function buildQueueEmbed() {
         : queue
             .map(
               (id, i) =>
-                `#${i + 1} | <@${id}> ELO: ${stats[id]?.elo || 1000}`
+                `#${i + 1} | <@${id}> 🏆 ELO: ${stats[id]?.elo || 1000}`
             )
             .join("\n")
     )
@@ -110,9 +110,9 @@ function buildButtons() {
   );
 }
 
-/* =======================
+/* ==========================
    COMMAND
-======================= */
+========================== */
 
 client.on("messageCreate", async message => {
   if (message.content === "!queue") {
@@ -123,9 +123,9 @@ client.on("messageCreate", async message => {
   }
 });
 
-/* =======================
-   BUTTON HANDLER
-======================= */
+/* ==========================
+   SINGLE INTERACTION HANDLER
+========================== */
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
@@ -155,6 +155,7 @@ client.on("interactionCreate", async interaction => {
       components: [buildButtons()]
     });
 
+    /* MATCH FOUND */
     if (queue.length === 6) {
       const { team1, team2, captain1, captain2 } =
         createBalancedTeams(queue);
