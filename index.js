@@ -22,6 +22,8 @@ const client = new Client({
 
 client.once("ready", () => log("INFO", `Bot ready — ${client.user.tag}`));
 
+
+
 // ─── STATS ───────────────────────────────────────────────────────────
 let stats = fs.existsSync("./stats.json")
   ? JSON.parse(fs.readFileSync("./stats.json")) : {};
@@ -115,10 +117,10 @@ function queueBtns(disabled=false) {
   );
 }
 async function refreshQueue(channel, locked=false) {
+  // Delete old queue message and resend at bottom so it stays visible
   const ex = queueMessages[channel.id];
   if (ex) {
-    const ok = await ex.edit({embeds:[queueEmbed()],components:[queueBtns(locked)]}).catch(()=>null);
-    if (ok) return;
+    await ex.delete().catch(()=>{});
     delete queueMessages[channel.id];
   }
   queueMessages[channel.id] = await channel.send({embeds:[queueEmbed()],components:[queueBtns(locked)]});
@@ -249,9 +251,9 @@ async function finishDraft() {
       `🚫 **Bans A:** ${match.bans.A.join(", ")||"—"}\n` +
       `🚫 **Bans B:** ${match.bans.B.join(", ")||"—"}\n\n` +
       `**🔵 Team A** — Captain <@${match.captainA}>\n` +
-      match.teamA.map((id,i) => `<@${id}>  →  **${match.picks.A[i]??"?"}**`).join("\n") +
+      match.teamA.map((id,i) => `<@${id}> → [**${match.picks.A[i]??"?"}**]`).join("\n") +
       `\n\n**🔴 Team B** — Captain <@${match.captainB}>\n` +
-      match.teamB.map((id,i) => `<@${id}>  →  **${match.picks.B[i]??"?"}**`).join("\n") +
+      match.teamB.map((id,i) => `<@${id}> → [**${match.picks.B[i]??"?"}**]`).join("\n") +
       `\n\n*3 votes needed to confirm the result.*`
     )
     .setFooter({text:"Vote below to confirm the winner."});
@@ -276,6 +278,13 @@ async function finishDraft() {
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
 
+  // Bump queue to bottom after any non-bot message (so it stays visible)
+  if (!match.active && queueMessages[msg.channel.id]) {
+    setTimeout(async () => {
+      await refreshQueue(msg.channel, false).catch(()=>{});
+    }, 600);
+  }
+
   if (msg.content === "!queue") {
     await refreshQueue(msg.channel, match.active); return;
   }
@@ -295,6 +304,48 @@ client.on("messageCreate", async msg => {
           {name:"Losses",   value:`\`${s.losses}\``, inline:true},
           {name:"Win Rate", value:`\`${total===0?0:Math.round(s.wins/total*100)}%\``, inline:true}
         )
+    ]});
+    return;
+  }
+
+  if (msg.content === "!ladder") {
+    const players = Object.entries(stats)
+      .sort(([,a],[,b]) => b.elo - a.elo)
+      .slice(0, 10);
+
+    if (players.length === 0)
+      return msg.channel.send("No players ranked yet. Play some matches first!");
+
+    const medals = ["🥇","🥈","🥉"];
+    const podium = (rank, id, s) => {
+      const total = s.wins + s.losses;
+      const wr = total === 0 ? 0 : Math.round(s.wins / total * 100);
+      if (rank === 0) return `🥇 **#1 — <@${id}>**
+┣ \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\`
+`;
+      if (rank === 1) return `🥈 **#2 — <@${id}>**
+┣ \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\`
+`;
+      if (rank === 2) return `🥉 **#3 — <@${id}>**
+┣ \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\`
+`;
+      return `**#${rank+1}** — <@${id}>  •  \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\``;
+    };
+
+    const desc =
+      players.slice(0,3).map(([id,s],i) => podium(i,id,s)).join("\n") +
+      (players.length > 3
+        ? "\n**━━━━━━━━━━━━━━━━━━━━━━━━**\n" +
+          players.slice(3).map(([id,s],i) => podium(i+3,id,s)).join("\n")
+        : "");
+
+    await msg.channel.send({embeds:[
+      new EmbedBuilder()
+        .setTitle("🏆  LobbyELO — Leaderboard")
+        .setColor(0xFEE75C)
+        .setDescription(desc)
+        .setFooter({text:"Top 10 players by ELO"})
+        .setTimestamp()
     ]});
     return;
   }
@@ -526,17 +577,49 @@ async function finishMatch(winner) {
   winners.forEach(id => { stats[id].elo+=25; stats[id].wins++; });
   losers.forEach(id  => { stats[id].elo=Math.max(0,stats[id].elo-25); stats[id].losses++; });
   saveStats();
-  await match.channel.send({embeds:[
-    new EmbedBuilder()
+
+  const resultEmbed = new EmbedBuilder()
+    .setTitle(`🏆  Team ${winner} Wins!`)
+    .setColor(winner==="A"?0x3498DB:0xE74C3C)
+    .setDescription(
+      "**🥇 Winners  (+25 ELO)**\n" +
+      winners.map(id=>`<@${id}>  **+25**  →  \`${stats[id].elo} ELO\``).join("\n") +
+      "\n\n**💀 Losers  (−25 ELO)**\n" +
+      losers.map(id=>`<@${id}>  **-25**  →  \`${stats[id].elo} ELO\``).join("\n")
+    )
+    .setTimestamp();
+
+  // Send result to main channel
+  await match.channel.send({embeds:[resultEmbed]});
+
+  // Also send to history-match-lobbyelo channel if it exists
+  // Force fetch all channels to make sure cache is up to date
+  await match.channel.guild.channels.fetch().catch(()=>{});
+  const historyChannel = match.channel.guild.channels.cache.find(
+    c => c.name === "history-match-lobbyelo" && c.isTextBased()
+  );
+  log("INFO", `History channel found: ${historyChannel ? historyChannel.name : "NOT FOUND"}`);
+  if (historyChannel) {
+    const historyEmbed = new EmbedBuilder()
       .setTitle(`🏆  Team ${winner} Wins!`)
       .setColor(winner==="A"?0x3498DB:0xE74C3C)
       .setDescription(
-        "**🥇 Winners  (+25 ELO)**\n" +
-        winners.map(id=>`<@${id}>  →  \`${stats[id].elo} ELO\``).join("\n") +
-        "\n\n**💀 Losers  (−25 ELO)**\n" +
-        losers.map(id=>`<@${id}>  →  \`${stats[id].elo} ELO\``).join("\n")
+        `**🚫 Bans A:** ${match.bans.A.join(", ")||"—"}\n` +
+        `**🚫 Bans B:** ${match.bans.B.join(", ")||"—"}\n\n` +
+        `**🔵 Team A** — Captain <@${match.captainA}>\n` +
+        match.teamA.map((id,i) => `<@${id}> → [**${match.picks.A[i]??"?"}**] → \`${stats[id].elo} ELO\``).join("\n") +
+        `\n\n**🔴 Team B** — Captain <@${match.captainB}>\n` +
+        match.teamB.map((id,i) => `<@${id}> → [**${match.picks.B[i]??"?"}**] → \`${stats[id].elo} ELO\``).join("\n") +
+        `\n\n**🥇 Winners (+25 ELO):** ${winners.map(id=>`<@${id}>`).join(", ")}\n` +
+        `**💀 Losers (−25 ELO):** ${losers.map(id=>`<@${id}>`).join(", ")}`
       )
-  ]});
+      .setTimestamp()
+      .setFooter({text:"LobbyELO Match History"});
+    await historyChannel.send({embeds:[historyEmbed]}).catch(err=>log("WARN","History channel send failed:",err));
+  } else {
+    log("WARN","Channel 'history-match-lobbyelo' not found — skipping history log.");
+  }
+
   await cleanup();
 }
 
