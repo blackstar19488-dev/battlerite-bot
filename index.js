@@ -65,6 +65,7 @@ function resetMatch() {
     votes:{A:new Set(),B:new Set()},
     channel:null, lobby:null, category:null, voiceA:null, voiceB:null,
     boardMsg:null,
+    activeCategory:null,  // tracks which category is open in draft buttons
     timerInterval:null, timerTimeout:null, timerSeconds:DRAFT_TIMER,
     lobbyTimeout:null
   };
@@ -244,7 +245,8 @@ function champBtns() { return categoryBtns(); }
 async function pushBoard() {
   if (!match.boardMsg || _boardEditing) return;
   _boardEditing = true;
-  await match.boardMsg.edit({embeds:[boardEmbed()],components:champBtns()})
+  const btns = match.activeCategory ? champBtnsForCat(match.activeCategory) : categoryBtns();
+  await match.boardMsg.edit({embeds:[boardEmbed()], components:btns})
     .catch(err => log("WARN","Board edit failed:",err));
   _boardEditing = false;
 }
@@ -289,6 +291,7 @@ async function startDraftStep() {
 
 function advanceDraft() {
   stopTimer();
+  match.activeCategory = null; // reset to category selector for next step
   match.draftStep++;
   if (match.draftStep >= DRAFT_SEQ.length) {
     finishDraft().catch(err => log("ERROR","finishDraft error:",err));
@@ -526,11 +529,13 @@ client.on("interactionCreate", async interaction => {
     const cat = interaction.customId.replace("cat_","");
 
     if (cat === "back") {
+      match.activeCategory = null;
       await interaction.update({embeds:[boardEmbed()], components:categoryBtns()});
       return;
     }
 
     // Show champions for selected category
+    match.activeCategory = cat;
     await interaction.update({embeds:[boardEmbed()], components:champBtnsForCat(cat)});
     return;
   }
