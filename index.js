@@ -236,7 +236,7 @@ function champBtnsForCat(catKey) {
 
   // Back button always last row
   rows.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("cat_back").setLabel("◀️ Back").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("cat_back").setLabel("◀ Back").setStyle(ButtonStyle.Secondary)
   ));
   return rows;
 }
@@ -784,4 +784,10 @@ async function cleanup() {
 }
 
 // ─── LOGIN ────────────────────────────────────────────────────────────
-client.login(process.env.TOKEN);
+log("INFO", `Attempting login, TOKEN present: ${!!process.env.TOKEN}`);
+client.login(process.env.TOKEN)
+  .then(() => log("INFO", "Login successful"))
+  .catch(err => {
+    log("ERROR", "Login failed:", err.message);
+    process.exit(1);
+  });
