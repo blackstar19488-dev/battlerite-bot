@@ -60,7 +60,7 @@ function resetMatch() {
   return {
     active:false, phase:null,
     expected:[], teamA:[], teamB:[], captainA:null, captainB:null,
-    draftStep:0, available:[...CHAMPS],
+    draftStep:0, available:{A:[...CHAMPS], B:[...CHAMPS]},
     bans:{A:[],B:[]}, picks:{A:[],B:[]},
     votes:{A:new Set(),B:new Set()},
     channel:null, lobby:null, category:null, voiceA:null, voiceB:null,
@@ -221,7 +221,9 @@ function champBtnsForCat(catKey) {
   const style = styleMap[catKey] ?? ButtonStyle.Secondary;
 
   const fullKey   = Object.keys(CHAMP_CATEGORIES).find(k => k.includes(catKey));
-  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => match.available.includes(c));
+  // Show champs not yet banned FOR this team (opponent's bans restrict this team)
+  const opposingBans = step().team === "A" ? match.bans.B : match.bans.A;
+  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => !opposingBans.includes(c));
   const rows      = [];
 
   for (let i = 0; i < available.length && rows.length < 4; i += 5) {
@@ -276,11 +278,18 @@ async function startDraftStep() {
   match.timerTimeout = setTimeout(async () => {
     stopTimer();
     if (!match.active || match.phase !== "draft") return;
-    const champ = match.available[Math.floor(Math.random()*match.available.length)];
+    const pool  = s.type === "ban"
+      ? match.available[s.team === "A" ? "B" : "A"]  // ban removes from opponent
+      : match.available[s.team];                       // pick from own pool
+    const champ = pool[Math.floor(Math.random()*pool.length)] ?? CHAMPS[0];
     const s = step(); const cap = captain();
-    match.available = match.available.filter(c=>c!==champ);
-    if (s.type==="ban") match.bans[s.team].push(champ);
-    else                match.picks[s.team].push(champ);
+    if (s.type==="ban") {
+      const opponent = s.team === "A" ? "B" : "A";
+      match.available[opponent] = match.available[opponent].filter(c=>c!==champ);
+      match.bans[s.team].push(champ);
+    } else {
+      match.picks[s.team].push(champ);
+    }
     log("INFO",`Auto-${s.type}: ${champ} for Team ${s.team}`);
     await match.channel.send(
       `⏱️ Time's up! **${champ}** was randomly **${s.type==="ban"?"banned":"picked"}** for Team ${s.team} (<@${cap}>).`
@@ -550,9 +559,11 @@ client.on("interactionCreate", async interaction => {
     if (!match.available.includes(champ))
       return interaction.reply({content:"❌ This champion is no longer available.",ephemeral:true});
     await interaction.deferUpdate().catch(()=>{});
-    match.available = match.available.filter(c=>c!==champ);
+    // Ban removes champion from OPPONENT pool only
+    const opponent = s.team === "A" ? "B" : "A";
+    match.available[opponent] = match.available[opponent].filter(c=>c!==champ);
     match.bans[s.team].push(champ);
-    log("INFO",`Team ${s.team} banned ${champ}`);
+    log("INFO",`Team ${s.team} banned ${champ} (removed from Team ${opponent} pool)`);
     advanceDraft();
     return;
   }
@@ -564,10 +575,9 @@ client.on("interactionCreate", async interaction => {
     if (s.type !== "pick")
       return interaction.reply({content:"❌ It's ban phase, not pick phase.",ephemeral:true});
     const champ = interaction.customId.replace("pick_","");
-    if (!match.available.includes(champ))
-      return interaction.reply({content:"❌ This champion is no longer available.",ephemeral:true});
+    if (!match.available[s.team].includes(champ))
+      return interaction.reply({content:"❌ This champion has been banned for your team.",ephemeral:true});
     await interaction.deferUpdate().catch(()=>{});
-    match.available = match.available.filter(c=>c!==champ);
     match.picks[s.team].push(champ);
     log("INFO",`Team ${s.team} picked ${champ}`);
     advanceDraft();
@@ -738,9 +748,9 @@ async function finishMatch(winner) {
         `**🚫 Bans A:** ${match.bans.A.join(", ")||"—"}\n` +
         `**🚫 Bans B:** ${match.bans.B.join(", ")||"—"}\n\n` +
         `**🔵 Team A** — Captain <@${match.captainA}>\n` +
-        match.teamA.map((id,i) => `<@${id}> [**${match.picks.A[i]??"?"}**]  **+25**  \`${stats[id].elo} ELO\``).join("\n") +
+        match.teamA.map((id,i) => `<@${id}> [**${match.picks.A[i]??"?"}**]  **${winner==="A"?"+25":"-25"}**  \`${stats[id].elo} ELO\``).join("\n") +
         `\n\n**🔴 Team B** — Captain <@${match.captainB}>\n` +
-        match.teamB.map((id,i) => `<@${id}> [**${match.picks.B[i]??"?"}**]  **-25**  \`${stats[id].elo} ELO\``).join("\n") +
+        match.teamB.map((id,i) => `<@${id}> [**${match.picks.B[i]??"?"}**]  **${winner==="B"?"+25":"-25"}**  \`${stats[id].elo} ELO\``).join("\n") +
         `\n\n**🥇 Winners (+25 ELO):** ${winners.map(id=>`<@${id}>`).join(", ")}\n` +
         `**💀 Losers (−25 ELO):** ${losers.map(id=>`<@${id}>`).join(", ")}`
       )
