@@ -22,6 +22,8 @@ const client = new Client({
 
 client.once("ready", () => log("INFO", `Bot ready — ${client.user.tag}`));
 
+
+
 // ─── STATS ───────────────────────────────────────────────────────────
 let stats = fs.existsSync("./stats.json")
   ? JSON.parse(fs.readFileSync("./stats.json")) : {};
@@ -31,12 +33,13 @@ function ensurePlayer(id) {
 }
 
 // ─── CONFIG ───────────────────────────────────────────────────────────
-const CHAMPS = [
-  "Alysia","Ashka","Bakko","Blossom","Croak","Destiny","Ezmo",
-  "Freya","Iva","Jade","Jamila","Jumong","Lucie","Oldur","Pearl",
-  "Pestilus","Poloma","Raigon","Rook","RuhKaan","ShenRao",
-  "Shifu","Sirius","Taya","Thorn","Ulric","Varesh"
-];
+// Champions organised by role
+const CHAMP_CATEGORIES = {
+  "⚔️ Melee":   ["Bakko","Croak","Freya","Jamila","Raigon","Rook","RuhKaan","Shifu","Thorn"],
+  "🏹 Range":   ["Alysia","Ashka","Destiny","Ezmo","Iva","Jade","Jumong","ShenRao","Taya","Varesh"],
+  "💚 Support": ["Blossom","Lucie","Oldur","Pearl","Pestilus","Poloma","Sirius","Ulric","Zander"]
+};
+const CHAMPS = Object.values(CHAMP_CATEGORIES).flat();
 const DRAFT_TIMER   = 45;
 const LOBBY_TIMEOUT = 200;
 const OWNER_ID      = "341553327412346880";
@@ -57,11 +60,12 @@ function resetMatch() {
   return {
     active:false, phase:null,
     expected:[], teamA:[], teamB:[], captainA:null, captainB:null,
-    draftStep:0, available:[...CHAMPS],
+    draftStep:0, available:{A:[...CHAMPS], B:[...CHAMPS]},
     bans:{A:[],B:[]}, picks:{A:[],B:[]},
     votes:{A:new Set(),B:new Set()},
     channel:null, lobby:null, category:null, voiceA:null, voiceB:null,
     boardMsg:null,
+    activeCategory:null,  // tracks which category is open in draft buttons
     timerInterval:null, timerTimeout:null, timerSeconds:DRAFT_TIMER,
     lobbyTimeout:null
   };
@@ -86,10 +90,28 @@ function timerBar(sec) {
 
 function balance(players) {
   players.forEach(id => ensurePlayer(id));
-  const sorted = [...players].sort((a,b) => stats[b].elo - stats[a].elo);
-  const A=[],B=[];
-  sorted.forEach((id,i) => (i%2===0?A:B).push(id));
-  return {A,B};
+
+  // Test all 20 possible combinations of 3 players from 6
+  // and pick the one with the smallest ELO difference between teams
+  const combos = [];
+  for (let i = 0; i < players.length; i++)
+    for (let j = i+1; j < players.length; j++)
+      for (let k = j+1; k < players.length; k++)
+        combos.push([i,j,k]);
+
+  let bestDiff = Infinity, bestA = [], bestB = [];
+
+  for (const [i,j,k] of combos) {
+    const A = [players[i], players[j], players[k]];
+    const B = players.filter((_,idx) => ![i,j,k].includes(idx));
+    const sumA = A.reduce((s,id) => s + (stats[id]?.elo ?? 1000), 0);
+    const sumB = B.reduce((s,id) => s + (stats[id]?.elo ?? 1000), 0);
+    const diff = Math.abs(sumA - sumB);
+    if (diff < bestDiff) { bestDiff = diff; bestA = A; bestB = B; }
+  }
+
+  log("INFO", `Balance: A=[${bestA}] sumA=${bestA.reduce((s,id)=>s+(stats[id]?.elo??1000),0)} | B=[${bestB}] sumB=${bestB.reduce((s,id)=>s+(stats[id]?.elo??1000),0)} | diff=${bestDiff}`);
+  return { A: bestA, B: bestB };
 }
 function pickCaptain(team) {
   return team.reduce((best,id) =>
@@ -115,21 +137,20 @@ function queueBtns(disabled=false) {
   );
 }
 async function refreshQueue(channel, locked=false) {
+  // Delete old queue message and resend at bottom so it stays visible
   const ex = queueMessages[channel.id];
   if (ex) {
-    const ok = await ex.edit({embeds:[queueEmbed()],components:[queueBtns(locked)]}).catch(()=>null);
-    if (ok) return;
+    await ex.delete().catch(()=>{});
     delete queueMessages[channel.id];
   }
   queueMessages[channel.id] = await channel.send({embeds:[queueEmbed()],components:[queueBtns(locked)]});
 }
 
 // ─── DRAFT BOARD ──────────────────────────────────────────────────────
-// ONE message edited in-place. Shows: timer, whose turn, bans, picks, teams.
 function boardEmbed() {
-  const s    = step();
+  const s     = step();
   const isBan = s.type === "ban";
-  const sec  = match.timerSeconds;
+  const sec   = match.timerSeconds;
 
   const progress = DRAFT_SEQ.map((x,i) => {
     if (i <  match.draftStep) return x.type==="ban" ? "🔴" : (x.team==="A"?"🔵":"🟠");
@@ -137,10 +158,22 @@ function boardEmbed() {
     return "⬜";
   }).join("");
 
-  const bansA  = Array.from({length:2},(_,i)=>match.bans.A[i]  ? `~~\`${match.bans.A[i]}\`~~`  : "`  ──  `").join("  ");
-  const bansB  = Array.from({length:2},(_,i)=>match.bans.B[i]  ? `~~\`${match.bans.B[i]}\`~~`  : "`  ──  `").join("  ");
-  const picksA = Array.from({length:3},(_,i)=>match.picks.A[i] ? `\`${match.picks.A[i]}\`` : "`  ──  `").join("  ");
-  const picksB = Array.from({length:3},(_,i)=>match.picks.B[i] ? `\`${match.picks.B[i]}\`` : "`  ──  `").join("  ");
+  // Bans summary line
+  const bansA = match.bans.A.length > 0 ? match.bans.A.join(", ") : "—";
+  const bansB = match.bans.B.length > 0 ? match.bans.B.join(", ") : "—";
+
+  // Face-to-face pick rows — player + champion on each side
+  const rows = Array.from({length:3}, (_,i) => {
+    const idA   = match.teamA[i] ?? null;
+    const idB   = match.teamB[i] ?? null;
+    const capA  = idA === match.captainA ? "👑 " : "   ";
+    const capB  = idB === match.captainB ? " 👑" : "   ";
+    const pickA = match.picks.A[i] ? `[**${match.picks.A[i]}**]` : "`  ?  `";
+    const pickB = match.picks.B[i] ? `[**${match.picks.B[i]}**]` : "`  ?  `";
+    const nameA = idA ? `<@${idA}>` : "—";
+    const nameB = idB ? `<@${idB}>` : "—";
+    return `${capA}${nameA} ${pickA}  \`|\`  ${pickB} ${nameB}${capB}`;
+  });
 
   const action = isBan
     ? `🚫 **Team ${s.team} must BAN** — Captain <@${captain()}>`
@@ -152,40 +185,70 @@ function boardEmbed() {
     .setDescription(
       `${action}\n` +
       `${timerBar(sec)}\n` +
-      `${progress}  *(step ${match.draftStep+1}/${DRAFT_SEQ.length})*\n\u200b\n` +
-      `**🔵 Team A** — Captain <@${match.captainA}>\n` +
-      `${match.teamA.map(id=>`<@${id}>`).join("  ·  ")}\n\u200b\n` +
-      `**🔴 Team B** — Captain <@${match.captainB}>\n` +
-      `${match.teamB.map(id=>`<@${id}>`).join("  ·  ")}\n\u200b\n` +
-      `**▬▬▬▬▬▬▬ BANS ▬▬▬▬▬▬▬**\n` +
-      `🔵 A :  ${bansA}\n` +
-      `🔴 B :  ${bansB}\n\u200b\n` +
-      `**▬▬▬▬▬▬▬ PICKS ▬▬▬▬▬▬▬**\n` +
-      `🔵 A :  ${picksA}\n` +
-      `🔴 B :  ${picksB}`
+      `${progress}  *(step ${match.draftStep+1}/${DRAFT_SEQ.length})*\n` +
+      `\u200b\n` +
+      `**🔵 TEAM A** ━━━━━━━━━━ ⚔️ ━━━━━━━━━━ **🔴 TEAM B**\n` +
+      `\u200b\n` +
+      rows.join("\n") +
+      `\n\u200b\n` +
+      `🚫 **Bans A:** ${bansA}   \`|\`   **Bans B:** ${bansB}`
     )
     .setFooter({text:`${DRAFT_TIMER}s per step — auto random on timeout  •  Only captains can act`});
 }
 
-function champBtns() {
-  const visible = match.available.slice(0,25);
-  const prefix  = step().type==="ban" ? "ban_" : "pick_";
-  const style   = step().type==="ban" ? ButtonStyle.Danger : ButtonStyle.Primary;
-  const rows=[];
-  for (let i=0; i<visible.length && rows.length<5; i+=5) {
+// Build category selector buttons (first screen)
+function categoryBtns() {
+  const isBan = step().type === "ban";
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("cat_Melee").setLabel("⚔️ Melee").setStyle(isBan ? ButtonStyle.Danger : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("cat_Range").setLabel("🏹 Range").setStyle(isBan ? ButtonStyle.Danger : ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("cat_Support").setLabel("💚 Support").setStyle(isBan ? ButtonStyle.Danger : ButtonStyle.Success)
+  );
+  return [row];
+}
+
+// Build champion buttons for a specific category
+function champBtnsForCat(catKey) {
+  const isBan  = step().type === "ban";
+  const prefix = isBan ? "ban_" : "pick_";
+
+  // Color: ban = all red, pick = by role
+  const styleMap = {
+    "Melee":   isBan ? ButtonStyle.Danger : ButtonStyle.Secondary,
+    "Range":   isBan ? ButtonStyle.Danger : ButtonStyle.Primary,
+    "Support": isBan ? ButtonStyle.Danger : ButtonStyle.Success
+  };
+  const style = styleMap[catKey] ?? ButtonStyle.Secondary;
+
+  const fullKey   = Object.keys(CHAMP_CATEGORIES).find(k => k.includes(catKey));
+  // Show champs not yet banned FOR this team (opponent's bans restrict this team)
+  const opposingBans = step().team === "A" ? match.bans.B : match.bans.A;
+  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => !opposingBans.includes(c));
+  const rows      = [];
+
+  for (let i = 0; i < available.length && rows.length < 4; i += 5) {
     const row = new ActionRowBuilder();
-    visible.slice(i,i+5).forEach(c =>
+    available.slice(i, i+5).forEach(c =>
       row.addComponents(new ButtonBuilder().setCustomId(prefix+c).setLabel(c).setStyle(style))
     );
     rows.push(row);
   }
+
+  // Back button always last row
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("cat_back").setLabel("◀️ Back").setStyle(ButtonStyle.Secondary)
+  ));
   return rows;
 }
+
+// Legacy alias — default shows category selector
+function champBtns() { return categoryBtns(); }
 
 async function pushBoard() {
   if (!match.boardMsg || _boardEditing) return;
   _boardEditing = true;
-  await match.boardMsg.edit({embeds:[boardEmbed()],components:champBtns()})
+  const btns = match.activeCategory ? champBtnsForCat(match.activeCategory) : categoryBtns();
+  await match.boardMsg.edit({embeds:[boardEmbed()], components:btns})
     .catch(err => log("WARN","Board edit failed:",err));
   _boardEditing = false;
 }
@@ -204,7 +267,6 @@ async function startDraftStep() {
     await pushBoard();
   }
 
-  // Edit every 3 seconds (safe under Discord 5-per-5s rate limit)
   match.timerInterval = setInterval(async () => {
     match.timerSeconds -= 3;
     if (match.timerSeconds <= 0) {
@@ -213,17 +275,21 @@ async function startDraftStep() {
     await pushBoard();
   }, 3000);
 
-  // Hard timeout — auto random ban/pick
   match.timerTimeout = setTimeout(async () => {
     stopTimer();
     if (!match.active || match.phase !== "draft") return;
-
-    const champ = match.available[Math.floor(Math.random()*match.available.length)];
+    const pool  = s.type === "ban"
+      ? match.available[s.team === "A" ? "B" : "A"]  // ban removes from opponent
+      : match.available[s.team];                       // pick from own pool
+    const champ = pool[Math.floor(Math.random()*pool.length)] ?? CHAMPS[0];
     const s = step(); const cap = captain();
-    match.available = match.available.filter(c=>c!==champ);
-    if (s.type==="ban") match.bans[s.team].push(champ);
-    else                match.picks[s.team].push(champ);
-
+    if (s.type==="ban") {
+      const opponent = s.team === "A" ? "B" : "A";
+      match.available[opponent] = match.available[opponent].filter(c=>c!==champ);
+      match.bans[s.team].push(champ);
+    } else {
+      match.picks[s.team].push(champ);
+    }
     log("INFO",`Auto-${s.type}: ${champ} for Team ${s.team}`);
     await match.channel.send(
       `⏱️ Time's up! **${champ}** was randomly **${s.type==="ban"?"banned":"picked"}** for Team ${s.team} (<@${cap}>).`
@@ -234,6 +300,7 @@ async function startDraftStep() {
 
 function advanceDraft() {
   stopTimer();
+  match.activeCategory = null; // reset to category selector for next step
   match.draftStep++;
   if (match.draftStep >= DRAFT_SEQ.length) {
     finishDraft().catch(err => log("ERROR","finishDraft error:",err));
@@ -254,9 +321,9 @@ async function finishDraft() {
       `🚫 **Bans A:** ${match.bans.A.join(", ")||"—"}\n` +
       `🚫 **Bans B:** ${match.bans.B.join(", ")||"—"}\n\n` +
       `**🔵 Team A** — Captain <@${match.captainA}>\n` +
-      match.teamA.map((id,i) => `<@${id}>  →  **${match.picks.A[i]??"?"}**`).join("\n") +
+      match.teamA.map((id,i) => `<@${id}> [**${match.picks.A[i]??"?"}**]`).join("\n") +
       `\n\n**🔴 Team B** — Captain <@${match.captainB}>\n` +
-      match.teamB.map((id,i) => `<@${id}>  →  **${match.picks.B[i]??"?"}**`).join("\n") +
+      match.teamB.map((id,i) => `<@${id}> [**${match.picks.B[i]??"?"}**]`).join("\n") +
       `\n\n*3 votes needed to confirm the result.*`
     )
     .setFooter({text:"Vote below to confirm the winner."});
@@ -281,6 +348,13 @@ async function finishDraft() {
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
 
+  // Bump queue to bottom after any non-bot message (so it stays visible)
+  if (!match.active && queueMessages[msg.channel.id]) {
+    setTimeout(async () => {
+      await refreshQueue(msg.channel, false).catch(()=>{});
+    }, 600);
+  }
+
   if (msg.content === "!queue") {
     await refreshQueue(msg.channel, match.active); return;
   }
@@ -300,6 +374,99 @@ client.on("messageCreate", async msg => {
           {name:"Losses",   value:`\`${s.losses}\``, inline:true},
           {name:"Win Rate", value:`\`${total===0?0:Math.round(s.wins/total*100)}%\``, inline:true}
         )
+    ]});
+    return;
+  }
+
+  if (msg.content === "!ladder") {
+    const players = Object.entries(stats)
+      .sort(([,a],[,b]) => b.elo - a.elo)
+      .slice(0, 10);
+
+    if (players.length === 0)
+      return msg.channel.send("No players ranked yet. Play some matches first!");
+
+    const medals = ["🥇","🥈","🥉"];
+    const podium = (rank, id, s) => {
+      const total = s.wins + s.losses;
+      const wr = total === 0 ? 0 : Math.round(s.wins / total * 100);
+      if (rank === 0) return `🥇 **#1 — <@${id}>**
+┣ \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\`
+`;
+      if (rank === 1) return `🥈 **#2 — <@${id}>**
+┣ \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\`
+`;
+      if (rank === 2) return `🥉 **#3 — <@${id}>**
+┣ \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\`
+`;
+      return `**#${rank+1}** — <@${id}>  •  \`${s.elo} ELO\`  •  \`${s.wins}W / ${s.losses}L\`  •  \`${wr}% WR\``;
+    };
+
+    const desc =
+      players.slice(0,3).map(([id,s],i) => podium(i,id,s)).join("\n") +
+      (players.length > 3
+        ? "\n**━━━━━━━━━━━━━━━━━━━━━━━━**\n" +
+          players.slice(3).map(([id,s],i) => podium(i+3,id,s)).join("\n")
+        : "");
+
+    await msg.channel.send({embeds:[
+      new EmbedBuilder()
+        .setTitle("🏆  LobbyELO — Leaderboard")
+        .setColor(0xFEE75C)
+        .setDescription(desc)
+        .setFooter({text:"Top 10 players by ELO"})
+        .setTimestamp()
+    ]});
+    return;
+  }
+
+  if (msg.content.startsWith("!setelo")) {
+    if (msg.author.id !== OWNER_ID)
+      return msg.reply("❌ You don't have permission to use this command.");
+
+    const args      = msg.content.split(" ");
+    const mentioned = msg.mentions.users.first();
+    const newElo    = parseInt(args[2]);
+
+    if (!mentioned || isNaN(newElo) || newElo < 0)
+      return msg.reply("❌ Usage: `!setelo @joueur <elo>` — ex: `!setelo @Ashterou 1200`");
+
+    ensurePlayer(mentioned.id);
+    const oldElo = stats[mentioned.id].elo;
+    stats[mentioned.id].elo = newElo;
+    saveStats();
+
+    log("INFO", `!setelo: ${mentioned.id} ${oldElo} → ${newElo} by ${msg.author.id}`);
+    await msg.channel.send({embeds:[
+      new EmbedBuilder()
+        .setTitle("✏️  ELO Updated")
+        .setColor(0xFEE75C)
+        .setDescription(
+          `<@${mentioned.id}>
+` +
+          `\`${oldElo} ELO\` → \`${newElo} ELO\``
+        )
+    ]});
+    return;
+  }
+
+  if (msg.content === "!resetstats") {
+    if (msg.author.id !== OWNER_ID)
+      return msg.reply("❌ You don't have permission to use this command.");
+
+    const count = Object.keys(stats).length;
+    Object.keys(stats).forEach(id => {
+      stats[id] = { elo: 1000, wins: 0, losses: 0 };
+    });
+    saveStats();
+    log("INFO", `!resetstats by ${msg.author.id} — ${count} players reset`);
+
+    await msg.channel.send({embeds:[
+      new EmbedBuilder()
+        .setTitle("🔄  Stats Reset!")
+        .setColor(0xED4245)
+        .setDescription(`**${count} players** have been reset to \`1000 ELO\` / \`0W\` / \`0L\`.`)
+        .setTimestamp()
     ]});
     return;
   }
@@ -335,7 +502,6 @@ client.on("messageCreate", async msg => {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
 
-  // JOIN
   if (interaction.customId === "q_join") {
     if (match.active)
       return interaction.reply({content:"⏳ A match is already in progress — wait for it to finish.",ephemeral:true});
@@ -356,7 +522,6 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  // LEAVE
   if (interaction.customId === "q_leave") {
     if (match.active)
       return interaction.reply({content:"❌ A match has started — you can no longer leave.",ephemeral:true});
@@ -365,7 +530,25 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  // BAN
+  // Category selector
+  if (match.active && match.phase === "draft" && interaction.customId.startsWith("cat_")) {
+    if (interaction.user.id !== captain())
+      return interaction.reply({content:`❌ Only the Team ${step().team} captain (<@${captain()}>) can act right now.`,ephemeral:true});
+
+    const cat = interaction.customId.replace("cat_","");
+
+    if (cat === "back") {
+      match.activeCategory = null;
+      await interaction.update({embeds:[boardEmbed()], components:categoryBtns()});
+      return;
+    }
+
+    // Show champions for selected category
+    match.activeCategory = cat;
+    await interaction.update({embeds:[boardEmbed()], components:champBtnsForCat(cat)});
+    return;
+  }
+
   if (match.active && match.phase === "draft" && interaction.customId.startsWith("ban_")) {
     const s = step();
     if (interaction.user.id !== captain())
@@ -376,14 +559,15 @@ client.on("interactionCreate", async interaction => {
     if (!match.available.includes(champ))
       return interaction.reply({content:"❌ This champion is no longer available.",ephemeral:true});
     await interaction.deferUpdate().catch(()=>{});
-    match.available = match.available.filter(c=>c!==champ);
+    // Ban removes champion from OPPONENT pool only
+    const opponent = s.team === "A" ? "B" : "A";
+    match.available[opponent] = match.available[opponent].filter(c=>c!==champ);
     match.bans[s.team].push(champ);
-    log("INFO",`Team ${s.team} banned ${champ}`);
+    log("INFO",`Team ${s.team} banned ${champ} (removed from Team ${opponent} pool)`);
     advanceDraft();
     return;
   }
 
-  // PICK
   if (match.active && match.phase === "draft" && interaction.customId.startsWith("pick_")) {
     const s = step();
     if (interaction.user.id !== captain())
@@ -391,17 +575,15 @@ client.on("interactionCreate", async interaction => {
     if (s.type !== "pick")
       return interaction.reply({content:"❌ It's ban phase, not pick phase.",ephemeral:true});
     const champ = interaction.customId.replace("pick_","");
-    if (!match.available.includes(champ))
-      return interaction.reply({content:"❌ This champion is no longer available.",ephemeral:true});
+    if (!match.available[s.team].includes(champ))
+      return interaction.reply({content:"❌ This champion has been banned for your team.",ephemeral:true});
     await interaction.deferUpdate().catch(()=>{});
-    match.available = match.available.filter(c=>c!==champ);
     match.picks[s.team].push(champ);
     log("INFO",`Team ${s.team} picked ${champ}`);
     advanceDraft();
     return;
   }
 
-  // VOTE
   if (match.active && match.phase === "vote" &&
       (interaction.customId === "voteA" || interaction.customId === "voteB")) {
     if (![...match.teamA,...match.teamB].includes(interaction.user.id))
@@ -494,7 +676,6 @@ async function startMatch() {
     ]
   });
 
-  // Move players FIRST — delete lobby AFTER (critical order)
   const lobbyId = match.lobby?.id ?? null;
   for (const id of A) {
     const m = await match.channel.guild.members.fetch(id).catch(()=>null);
@@ -537,17 +718,49 @@ async function finishMatch(winner) {
   winners.forEach(id => { stats[id].elo+=25; stats[id].wins++; });
   losers.forEach(id  => { stats[id].elo=Math.max(0,stats[id].elo-25); stats[id].losses++; });
   saveStats();
-  await match.channel.send({embeds:[
-    new EmbedBuilder()
+
+  const resultEmbed = new EmbedBuilder()
+    .setTitle(`🏆  Team ${winner} Wins!`)
+    .setColor(winner==="A"?0x3498DB:0xE74C3C)
+    .setDescription(
+      "**🥇 Winners  (+25 ELO)**\n" +
+      winners.map(id=>`<@${id}>  **+25**  \`${stats[id].elo} ELO\``).join("\n") +
+      "\n\n**💀 Losers  (−25 ELO)**\n" +
+      losers.map(id=>`<@${id}>  **-25**  \`${stats[id].elo} ELO\``).join("\n")
+    )
+    .setTimestamp();
+
+  // Send result to main channel
+  await match.channel.send({embeds:[resultEmbed]});
+
+  // Also send to history-match-lobbyelo channel if it exists
+  // Force fetch all channels to make sure cache is up to date
+  await match.channel.guild.channels.fetch().catch(()=>{});
+  const historyChannel = match.channel.guild.channels.cache.find(
+    c => c.name === "history-match-lobbyelo" && c.isTextBased()
+  );
+  log("INFO", `History channel found: ${historyChannel ? historyChannel.name : "NOT FOUND"}`);
+  if (historyChannel) {
+    const historyEmbed = new EmbedBuilder()
       .setTitle(`🏆  Team ${winner} Wins!`)
       .setColor(winner==="A"?0x3498DB:0xE74C3C)
       .setDescription(
-        "**🥇 Winners  (+25 ELO)**\n" +
-        winners.map(id=>`<@${id}>  →  \`${stats[id].elo} ELO\``).join("\n") +
-        "\n\n**💀 Losers  (−25 ELO)**\n" +
-        losers.map(id=>`<@${id}>  →  \`${stats[id].elo} ELO\``).join("\n")
+        `**🚫 Bans A:** ${match.bans.A.join(", ")||"—"}\n` +
+        `**🚫 Bans B:** ${match.bans.B.join(", ")||"—"}\n\n` +
+        `**🔵 Team A** — Captain <@${match.captainA}>\n` +
+        match.teamA.map((id,i) => `<@${id}> [**${match.picks.A[i]??"?"}**]  **${winner==="A"?"+25":"-25"}**  \`${stats[id].elo} ELO\``).join("\n") +
+        `\n\n**🔴 Team B** — Captain <@${match.captainB}>\n` +
+        match.teamB.map((id,i) => `<@${id}> [**${match.picks.B[i]??"?"}**]  **${winner==="B"?"+25":"-25"}**  \`${stats[id].elo} ELO\``).join("\n") +
+        `\n\n**🥇 Winners (+25 ELO):** ${winners.map(id=>`<@${id}>`).join(", ")}\n` +
+        `**💀 Losers (−25 ELO):** ${losers.map(id=>`<@${id}>`).join(", ")}`
       )
-  ]});
+      .setTimestamp()
+      .setFooter({text:"LobbyELO Match History"});
+    await historyChannel.send({embeds:[historyEmbed]}).catch(err=>log("WARN","History channel send failed:",err));
+  } else {
+    log("WARN","Channel 'history-match-lobbyelo' not found — skipping history log.");
+  }
+
   await cleanup();
 }
 
