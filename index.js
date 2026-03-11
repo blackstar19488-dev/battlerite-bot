@@ -438,6 +438,27 @@ client.on("messageCreate", async msg => {
     return;
   }
 
+  if (msg.content === "!resetstats") {
+    if (msg.author.id !== OWNER_ID)
+      return msg.reply("❌ You don't have permission to use this command.");
+
+    const count = Object.keys(stats).length;
+    Object.keys(stats).forEach(id => {
+      stats[id] = { elo: 1000, wins: 0, losses: 0 };
+    });
+    saveStats();
+    log("INFO", `!resetstats by ${msg.author.id} — ${count} players reset`);
+
+    await msg.channel.send({embeds:[
+      new EmbedBuilder()
+        .setTitle("🔄  Stats Reset!")
+        .setColor(0xED4245)
+        .setDescription(`**${count} players** have been reset to \`1000 ELO\` / \`0W\` / \`0L\`.`)
+        .setTimestamp()
+    ]});
+    return;
+  }
+
   if (msg.content === "!resetlobby") {
     log("INFO",`!resetlobby by ${msg.author.id} (${msg.author.username})`);
     if (msg.author.id !== OWNER_ID)
