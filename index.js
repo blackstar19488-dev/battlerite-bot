@@ -33,12 +33,13 @@ function ensurePlayer(id) {
 }
 
 // ─── CONFIG ───────────────────────────────────────────────────────────
-const CHAMPS = [
-  "Alysia","Ashka","Bakko","Blossom","Croak","Destiny","Ezmo",
-  "Freya","Iva","Jade","Jamila","Jumong","Lucie","Oldur","Pearl",
-  "Pestilus","Poloma","Raigon","Rook","RuhKaan","ShenRao",
-  "Shifu","Sirius","Taya","Thorn","Ulric","Varesh"
-];
+// Champions organised by role
+const CHAMP_CATEGORIES = {
+  "⚔️ Melee":   ["Bakko","Croak","Freya","Jamila","Raigon","Rook","RuhKaan","Shifu","Thorn"],
+  "🏹 Range":   ["Alysia","Ashka","Destiny","Ezmo","Iva","Jade","Jumong","ShenRao","Taya","Varesh"],
+  "💚 Support": ["Blossom","Lucie","Oldur","Pearl","Pestilus","Poloma","Sirius","Ulric","Zander"]
+};
+const CHAMPS = Object.values(CHAMP_CATEGORIES).flat();
 const DRAFT_TIMER   = 45;
 const LOBBY_TIMEOUT = 200;
 const OWNER_ID      = "341553327412346880";
@@ -138,10 +139,22 @@ function boardEmbed() {
     return "⬜";
   }).join("");
 
-  const bansA  = Array.from({length:2},(_,i)=>match.bans.A[i]  ? `~~\`${match.bans.A[i]}\`~~`  : "`  ──  `").join("  ");
-  const bansB  = Array.from({length:2},(_,i)=>match.bans.B[i]  ? `~~\`${match.bans.B[i]}\`~~`  : "`  ──  `").join("  ");
-  const picksA = Array.from({length:3},(_,i)=>match.picks.A[i] ? `\`${match.picks.A[i]}\`` : "`  ──  `").join("  ");
-  const picksB = Array.from({length:3},(_,i)=>match.picks.B[i] ? `\`${match.picks.B[i]}\`` : "`  ──  `").join("  ");
+  // Bans summary line
+  const bansA = match.bans.A.length > 0 ? match.bans.A.join(", ") : "—";
+  const bansB = match.bans.B.length > 0 ? match.bans.B.join(", ") : "—";
+
+  // Face-to-face pick rows — player + champion on each side
+  const rows = Array.from({length:3}, (_,i) => {
+    const idA   = match.teamA[i] ?? null;
+    const idB   = match.teamB[i] ?? null;
+    const capA  = idA === match.captainA ? "👑 " : "   ";
+    const capB  = idB === match.captainB ? " 👑" : "   ";
+    const pickA = match.picks.A[i] ? `[**${match.picks.A[i]}**]` : "`  ?  `";
+    const pickB = match.picks.B[i] ? `[**${match.picks.B[i]}**]` : "`  ?  `";
+    const nameA = idA ? `<@${idA}>` : "—";
+    const nameB = idB ? `<@${idB}>` : "—";
+    return `${capA}${nameA} ${pickA}  \`|\`  ${pickB} ${nameB}${capB}`;
+  });
 
   const action = isBan
     ? `🚫 **Team ${s.team} must BAN** — Captain <@${captain()}>`
@@ -153,35 +166,62 @@ function boardEmbed() {
     .setDescription(
       `${action}\n` +
       `${timerBar(sec)}\n` +
-      `${progress}  *(step ${match.draftStep+1}/${DRAFT_SEQ.length})*\n\u200b\n` +
-      `**🔵 Team A** — Captain <@${match.captainA}>\n` +
-      `${match.teamA.map(id=>`<@${id}>`).join("  ·  ")}\n\u200b\n` +
-      `**🔴 Team B** — Captain <@${match.captainB}>\n` +
-      `${match.teamB.map(id=>`<@${id}>`).join("  ·  ")}\n\u200b\n` +
-      `**▬▬▬▬▬▬▬ BANS ▬▬▬▬▬▬▬**\n` +
-      `🔵 A :  ${bansA}\n` +
-      `🔴 B :  ${bansB}\n\u200b\n` +
-      `**▬▬▬▬▬▬▬ PICKS ▬▬▬▬▬▬▬**\n` +
-      `🔵 A :  ${picksA}\n` +
-      `🔴 B :  ${picksB}`
+      `${progress}  *(step ${match.draftStep+1}/${DRAFT_SEQ.length})*\n` +
+      `\u200b\n` +
+      `**🔵 TEAM A** ━━━━━━━━━━ ⚔️ ━━━━━━━━━━ **🔴 TEAM B**\n` +
+      `\u200b\n` +
+      rows.join("\n") +
+      `\n\u200b\n` +
+      `🚫 **Bans A:** ${bansA}   \`|\`   **Bans B:** ${bansB}`
     )
     .setFooter({text:`${DRAFT_TIMER}s per step — auto random on timeout  •  Only captains can act`});
 }
 
-function champBtns() {
-  const visible = match.available.slice(0,25);
-  const prefix  = step().type==="ban" ? "ban_" : "pick_";
-  const style   = step().type==="ban" ? ButtonStyle.Danger : ButtonStyle.Primary;
-  const rows=[];
-  for (let i=0; i<visible.length && rows.length<5; i+=5) {
+// Build category selector buttons (first screen)
+function categoryBtns() {
+  const isBan = step().type === "ban";
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("cat_Melee").setLabel("⚔️ Melee").setStyle(isBan ? ButtonStyle.Danger : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("cat_Range").setLabel("🏹 Range").setStyle(isBan ? ButtonStyle.Danger : ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("cat_Support").setLabel("💚 Support").setStyle(isBan ? ButtonStyle.Danger : ButtonStyle.Success)
+  );
+  return [row];
+}
+
+// Build champion buttons for a specific category
+function champBtnsForCat(catKey) {
+  const isBan  = step().type === "ban";
+  const prefix = isBan ? "ban_" : "pick_";
+
+  // Color: ban = all red, pick = by role
+  const styleMap = {
+    "Melee":   isBan ? ButtonStyle.Danger : ButtonStyle.Secondary,
+    "Range":   isBan ? ButtonStyle.Danger : ButtonStyle.Primary,
+    "Support": isBan ? ButtonStyle.Danger : ButtonStyle.Success
+  };
+  const style = styleMap[catKey] ?? ButtonStyle.Secondary;
+
+  const fullKey   = Object.keys(CHAMP_CATEGORIES).find(k => k.includes(catKey));
+  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => match.available.includes(c));
+  const rows      = [];
+
+  for (let i = 0; i < available.length && rows.length < 4; i += 5) {
     const row = new ActionRowBuilder();
-    visible.slice(i,i+5).forEach(c =>
+    available.slice(i, i+5).forEach(c =>
       row.addComponents(new ButtonBuilder().setCustomId(prefix+c).setLabel(c).setStyle(style))
     );
     rows.push(row);
   }
+
+  // Back button always last row
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("cat_back").setLabel("◀️ Back").setStyle(ButtonStyle.Secondary)
+  ));
   return rows;
 }
+
+// Legacy alias — default shows category selector
+function champBtns() { return categoryBtns(); }
 
 async function pushBoard() {
   if (!match.boardMsg || _boardEditing) return;
@@ -251,9 +291,9 @@ async function finishDraft() {
       `🚫 **Bans A:** ${match.bans.A.join(", ")||"—"}\n` +
       `🚫 **Bans B:** ${match.bans.B.join(", ")||"—"}\n\n` +
       `**🔵 Team A** — Captain <@${match.captainA}>\n` +
-      match.teamA.map((id,i) => `<@${id}> → [**${match.picks.A[i]??"?"}**]`).join("\n") +
+      match.teamA.map((id,i) => `<@${id}> [**${match.picks.A[i]??"?"}**]`).join("\n") +
       `\n\n**🔴 Team B** — Captain <@${match.captainB}>\n` +
-      match.teamB.map((id,i) => `<@${id}> → [**${match.picks.B[i]??"?"}**]`).join("\n") +
+      match.teamB.map((id,i) => `<@${id}> [**${match.picks.B[i]??"?"}**]`).join("\n") +
       `\n\n*3 votes needed to confirm the result.*`
     )
     .setFooter({text:"Vote below to confirm the winner."});
@@ -350,6 +390,36 @@ client.on("messageCreate", async msg => {
     return;
   }
 
+  if (msg.content.startsWith("!setelo")) {
+    if (msg.author.id !== OWNER_ID)
+      return msg.reply("❌ You don't have permission to use this command.");
+
+    const args      = msg.content.split(" ");
+    const mentioned = msg.mentions.users.first();
+    const newElo    = parseInt(args[2]);
+
+    if (!mentioned || isNaN(newElo) || newElo < 0)
+      return msg.reply("❌ Usage: `!setelo @joueur <elo>` — ex: `!setelo @Ashterou 1200`");
+
+    ensurePlayer(mentioned.id);
+    const oldElo = stats[mentioned.id].elo;
+    stats[mentioned.id].elo = newElo;
+    saveStats();
+
+    log("INFO", `!setelo: ${mentioned.id} ${oldElo} → ${newElo} by ${msg.author.id}`);
+    await msg.channel.send({embeds:[
+      new EmbedBuilder()
+        .setTitle("✏️  ELO Updated")
+        .setColor(0xFEE75C)
+        .setDescription(
+          `<@${mentioned.id}>
+` +
+          `\`${oldElo} ELO\` → \`${newElo} ELO\``
+        )
+    ]});
+    return;
+  }
+
   if (msg.content === "!resetlobby") {
     log("INFO",`!resetlobby by ${msg.author.id} (${msg.author.username})`);
     if (msg.author.id !== OWNER_ID)
@@ -406,6 +476,23 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({content:"❌ A match has started — you can no longer leave.",ephemeral:true});
     queue = queue.filter(id => id !== interaction.user.id);
     await interaction.update({embeds:[queueEmbed()],components:[queueBtns(false)]});
+    return;
+  }
+
+  // Category selector
+  if (match.active && match.phase === "draft" && interaction.customId.startsWith("cat_")) {
+    if (interaction.user.id !== captain())
+      return interaction.reply({content:`❌ Only the Team ${step().team} captain (<@${captain()}>) can act right now.`,ephemeral:true});
+
+    const cat = interaction.customId.replace("cat_","");
+
+    if (cat === "back") {
+      await interaction.update({embeds:[boardEmbed()], components:categoryBtns()});
+      return;
+    }
+
+    // Show champions for selected category
+    await interaction.update({embeds:[boardEmbed()], components:champBtnsForCat(cat)});
     return;
   }
 
@@ -583,9 +670,9 @@ async function finishMatch(winner) {
     .setColor(winner==="A"?0x3498DB:0xE74C3C)
     .setDescription(
       "**🥇 Winners  (+25 ELO)**\n" +
-      winners.map(id=>`<@${id}>  **+25**  →  \`${stats[id].elo} ELO\``).join("\n") +
+      winners.map(id=>`<@${id}>  **+25**  \`${stats[id].elo} ELO\``).join("\n") +
       "\n\n**💀 Losers  (−25 ELO)**\n" +
-      losers.map(id=>`<@${id}>  **-25**  →  \`${stats[id].elo} ELO\``).join("\n")
+      losers.map(id=>`<@${id}>  **-25**  \`${stats[id].elo} ELO\``).join("\n")
     )
     .setTimestamp();
 
@@ -607,9 +694,9 @@ async function finishMatch(winner) {
         `**🚫 Bans A:** ${match.bans.A.join(", ")||"—"}\n` +
         `**🚫 Bans B:** ${match.bans.B.join(", ")||"—"}\n\n` +
         `**🔵 Team A** — Captain <@${match.captainA}>\n` +
-        match.teamA.map((id,i) => `<@${id}> → [**${match.picks.A[i]??"?"}**] → \`${stats[id].elo} ELO\``).join("\n") +
+        match.teamA.map((id,i) => `<@${id}> [**${match.picks.A[i]??"?"}**]  **+25**  \`${stats[id].elo} ELO\``).join("\n") +
         `\n\n**🔴 Team B** — Captain <@${match.captainB}>\n` +
-        match.teamB.map((id,i) => `<@${id}> → [**${match.picks.B[i]??"?"}**] → \`${stats[id].elo} ELO\``).join("\n") +
+        match.teamB.map((id,i) => `<@${id}> [**${match.picks.B[i]??"?"}**]  **-25**  \`${stats[id].elo} ELO\``).join("\n") +
         `\n\n**🥇 Winners (+25 ELO):** ${winners.map(id=>`<@${id}>`).join(", ")}\n` +
         `**💀 Losers (−25 ELO):** ${losers.map(id=>`<@${id}>`).join(", ")}`
       )
