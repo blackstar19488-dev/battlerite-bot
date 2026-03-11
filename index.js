@@ -236,7 +236,7 @@ function champBtnsForCat(catKey) {
 
   // Back button always last row
   rows.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("cat_back").setLabel("◀ Back").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("cat_back").setLabel("◀️ Back").setStyle(ButtonStyle.Secondary)
   ));
   return rows;
 }
@@ -551,12 +551,13 @@ client.on("interactionCreate", async interaction => {
 
   if (match.active && match.phase === "draft" && interaction.customId.startsWith("ban_")) {
     const s = step();
-    if (interaction.user.id !== captain())
-      return interaction.reply({content:`❌ Only the Team ${s.team} captain (<@${captain()}>) can ban right now.`,ephemeral:true});
+    const capId = captain();
+    if (interaction.user.id !== capId)
+      return interaction.reply({content:`❌ Only the Team ${s.team} captain (<@${capId}>) can ban right now.`,ephemeral:true});
     if (s.type !== "ban")
       return interaction.reply({content:"❌ It's pick phase, not ban phase.",ephemeral:true});
     const champ = interaction.customId.replace("ban_","");
-    if (!match.available.includes(champ))
+    if (!match.available[s.team].includes(champ))
       return interaction.reply({content:"❌ This champion is no longer available.",ephemeral:true});
     await interaction.deferUpdate().catch(()=>{});
     // Ban removes champion from OPPONENT pool only
