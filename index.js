@@ -89,10 +89,28 @@ function timerBar(sec) {
 
 function balance(players) {
   players.forEach(id => ensurePlayer(id));
-  const sorted = [...players].sort((a,b) => stats[b].elo - stats[a].elo);
-  const A=[],B=[];
-  sorted.forEach((id,i) => (i%2===0?A:B).push(id));
-  return {A,B};
+
+  // Test all 20 possible combinations of 3 players from 6
+  // and pick the one with the smallest ELO difference between teams
+  const combos = [];
+  for (let i = 0; i < players.length; i++)
+    for (let j = i+1; j < players.length; j++)
+      for (let k = j+1; k < players.length; k++)
+        combos.push([i,j,k]);
+
+  let bestDiff = Infinity, bestA = [], bestB = [];
+
+  for (const [i,j,k] of combos) {
+    const A = [players[i], players[j], players[k]];
+    const B = players.filter((_,idx) => ![i,j,k].includes(idx));
+    const sumA = A.reduce((s,id) => s + (stats[id]?.elo ?? 1000), 0);
+    const sumB = B.reduce((s,id) => s + (stats[id]?.elo ?? 1000), 0);
+    const diff = Math.abs(sumA - sumB);
+    if (diff < bestDiff) { bestDiff = diff; bestA = A; bestB = B; }
+  }
+
+  log("INFO", `Balance: A=[${bestA}] sumA=${bestA.reduce((s,id)=>s+(stats[id]?.elo??1000),0)} | B=[${bestB}] sumB=${bestB.reduce((s,id)=>s+(stats[id]?.elo??1000),0)} | diff=${bestDiff}`);
+  return { A: bestA, B: bestB };
 }
 function pickCaptain(team) {
   return team.reduce((best,id) =>
