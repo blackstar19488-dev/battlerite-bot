@@ -60,11 +60,13 @@ function resetMatch() {
   return {
     active:false, phase:null,
     expected:[], teamA:[], teamB:[], captainA:null, captainB:null,
-    draftStep:0, available:{A:[...CHAMPS], B:[...CHAMPS]},
+    draftStep:0, available:[...CHAMPS],
     bans:{A:[],B:[]}, picks:{A:[],B:[]},
     votes:{A:new Set(),B:new Set()},
     channel:null, lobby:null, category:null, voiceA:null, voiceB:null,
     boardMsg:null,
+    announceMsg:null,   // "Match Starting!" message
+    lobbyPingMsg:null,  // "Queue full! Join voice..." message
     activeCategory:null,  // tracks which category is open in draft buttons
     timerInterval:null, timerTimeout:null, timerSeconds:DRAFT_TIMER,
     lobbyTimeout:null
@@ -221,9 +223,14 @@ function champBtnsForCat(catKey) {
   const style = styleMap[catKey] ?? ButtonStyle.Secondary;
 
   const fullKey   = Object.keys(CHAMP_CATEGORIES).find(k => k.includes(catKey));
-  // Show champs not yet banned FOR this team (opponent's bans restrict this team)
-  const opposingBans = step().team === "A" ? match.bans.B : match.bans.A;
-  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => !opposingBans.includes(c));
+  const s = step();
+  const isBanPhase = s.type === "ban";
+  const myBans  = s.team === "A" ? match.bans.A : match.bans.B;
+  const oppBans = s.team === "A" ? match.bans.B : match.bans.A;
+  // Ban phase: can ban any champ except ones this team already banned
+  // Pick phase: can pick any champ except ones banned by opponent
+  const excluded = isBanPhase ? myBans : oppBans;
+  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => !excluded.includes(c));
   const rows      = [];
 
   for (let i = 0; i < available.length && rows.length < 4; i += 5) {
@@ -236,7 +243,7 @@ function champBtnsForCat(catKey) {
 
   // Back button always last row
   rows.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("cat_back").setLabel("◀️ Back").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("cat_back").setLabel("◀ Back").setStyle(ButtonStyle.Secondary)
   ));
   return rows;
 }
@@ -278,22 +285,37 @@ async function startDraftStep() {
   match.timerTimeout = setTimeout(async () => {
     stopTimer();
     if (!match.active || match.phase !== "draft") return;
-    const pool  = s.type === "ban"
-      ? match.available[s.team === "A" ? "B" : "A"]  // ban removes from opponent
-      : match.available[s.team];                       // pick from own pool
-    const champ = pool[Math.floor(Math.random()*pool.length)] ?? CHAMPS[0];
     const s = step(); const cap = captain();
-    if (s.type==="ban") {
-      const opponent = s.team === "A" ? "B" : "A";
-      match.available[opponent] = match.available[opponent].filter(c=>c!==champ);
+    const opponent = s.team === "A" ? "B" : "A";
+
+    if (s.type === "ban") {
+      // Auto-ban: pick random champ not already banned by this team
+      const pool = CHAMPS.filter(c => !match.bans[s.team].includes(c));
+      const champ = pool[Math.floor(Math.random() * pool.length)];
       match.bans[s.team].push(champ);
+      // If opponent also banned same champ → double ban, remove from available
+      if (match.bans[opponent].includes(champ)) {
+        match.available = match.available.filter(c => c !== champ);
+        log("INFO", `Auto-ban: ${champ} for Team ${s.team} — double ban, removed from pick pool`);
+      } else {
+        log("INFO", `Auto-ban: ${champ} for Team ${s.team} (bans for Team ${opponent})`);
+      }
+      await match.channel.send(
+        `⏱️ Time's up! **${champ}** was automatically **banned** for Team ${s.team} (<@${cap}>).`
+      ).catch(()=>{});
+
     } else {
+      // Auto-pick: pick random champ not banned by opponent and still available
+      const oppBans = s.team === "A" ? match.bans.B : match.bans.A;
+      const pool = match.available.filter(c => !oppBans.includes(c));
+      const champ = pool[Math.floor(Math.random() * pool.length)] ?? match.available[0];
       match.picks[s.team].push(champ);
+      log("INFO", `Auto-pick: ${champ} for Team ${s.team}`);
+      await match.channel.send(
+        `⏱️ Time's up! **${champ}** was automatically **picked** for Team ${s.team} (<@${cap}>).`
+      ).catch(()=>{});
     }
-    log("INFO",`Auto-${s.type}: ${champ} for Team ${s.team}`);
-    await match.channel.send(
-      `⏱️ Time's up! **${champ}** was randomly **${s.type==="ban"?"banned":"picked"}** for Team ${s.team} (<@${cap}>).`
-    ).catch(()=>{});
+
     advanceDraft();
   }, DRAFT_TIMER*1000);
 }
@@ -557,14 +579,18 @@ client.on("interactionCreate", async interaction => {
     if (s.type !== "ban")
       return interaction.reply({content:"❌ It's pick phase, not ban phase.",ephemeral:true});
     const champ = interaction.customId.replace("ban_","");
-    if (!match.available[s.team].includes(champ))
-      return interaction.reply({content:"❌ This champion is no longer available.",ephemeral:true});
+    if (match.bans[s.team].includes(champ))
+      return interaction.reply({content:"❌ Your team already banned this champion.",ephemeral:true});
     await interaction.deferUpdate().catch(()=>{});
-    // Ban removes champion from OPPONENT pool only
-    const opponent = s.team === "A" ? "B" : "A";
-    match.available[opponent] = match.available[opponent].filter(c=>c!==champ);
     match.bans[s.team].push(champ);
-    log("INFO",`Team ${s.team} banned ${champ} (removed from Team ${opponent} pool)`);
+    // If both teams banned the same champ, remove from available pool
+    const opponent = s.team === "A" ? "B" : "A";
+    if (match.bans[opponent].includes(champ)) {
+      match.available = match.available.filter(c=>c!==champ);
+      log("INFO",`Team ${s.team} banned ${champ} — double ban, removed from pick pool`);
+    } else {
+      log("INFO",`Team ${s.team} banned ${champ} for Team ${opponent}`);
+    }
     advanceDraft();
     return;
   }
@@ -576,8 +602,11 @@ client.on("interactionCreate", async interaction => {
     if (s.type !== "pick")
       return interaction.reply({content:"❌ It's ban phase, not pick phase.",ephemeral:true});
     const champ = interaction.customId.replace("pick_","");
-    if (!match.available[s.team].includes(champ))
-      return interaction.reply({content:"❌ This champion has been banned for your team.",ephemeral:true});
+    const oppBans = s.team === "A" ? match.bans.B : match.bans.A;
+    if (oppBans.includes(champ) && !match.bans[s.team].includes(champ))
+      return interaction.reply({content:"❌ This champion was banned for your team.",ephemeral:true});
+    if (!match.available.includes(champ))
+      return interaction.reply({content:"❌ This champion was double-banned and is unavailable.",ephemeral:true});
     await interaction.deferUpdate().catch(()=>{});
     match.picks[s.team].push(champ);
     log("INFO",`Team ${s.team} picked ${champ}`);
@@ -612,7 +641,7 @@ async function startLobby(channel) {
   match.expected = [...queue];
   queue          = [];
 
-  await channel.send({
+  match.lobbyPingMsg = await channel.send({
     content:
       `🎮 **Queue full!** ${match.expected.map(id=>`<@${id}>`).join(" ")}\n` +
       `Join voice channel **🔊 3v3 LOBBY JOIN** to start the match.`,
@@ -695,7 +724,7 @@ async function startMatch() {
 
   match.phase = "draft";
 
-  await match.channel.send({embeds:[
+  match.announceMsg = await match.channel.send({embeds:[
     new EmbedBuilder()
       .setTitle("⚔️  Match Starting!")
       .setColor(0xFEE75C)
@@ -730,6 +759,11 @@ async function finishMatch(winner) {
       losers.map(id=>`<@${id}>  **-25**  \`${stats[id].elo} ELO\``).join("\n")
     )
     .setTimestamp();
+
+  // Delete all match messages to clean up the channel
+  if (match.lobbyPingMsg) await match.lobbyPingMsg.delete().catch(()=>{});
+  if (match.announceMsg)  await match.announceMsg.delete().catch(()=>{});
+  if (match.boardMsg)     await match.boardMsg.delete().catch(()=>{});
 
   // Send result to main channel
   await match.channel.send({embeds:[resultEmbed]});
