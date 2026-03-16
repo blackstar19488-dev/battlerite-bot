@@ -894,21 +894,8 @@ client.on("messageCreate", async msg => {
       // In the queue channel → show/refresh the embed here
       await refreshQueue(msg.channel, false);
     } else if (queueChannel) {
-      // In another channel → update the embed in queue-lobby-elo silently
+      // In another channel → just update the embed in queue-lobby-elo silently
       await refreshQueue(queueChannel, false).catch(() => {});
-      let reply;
-      if (joined) {
-        reply = await msg.reply(`✅ You joined the queue! (${queue.length}/6) — Check <#${queueChannel.id}>`);
-      } else if (queue.includes(userId)) {
-        reply = await msg.reply(`You're already in the queue. (${queue.length}/6) — Check <#${queueChannel.id}>`);
-      } else {
-        reply = await msg.reply(`❌ Can't join right now. Check <#${queueChannel.id}> for details.`);
-      }
-      // Auto-delete both messages after 4 seconds to avoid clutter
-      setTimeout(async () => {
-        await msg.delete().catch(() => {});
-        if (reply) await reply.delete().catch(() => {});
-      }, 4000);
     } else {
       // No queue channel found — fallback to current channel
       await refreshQueue(msg.channel, false);
