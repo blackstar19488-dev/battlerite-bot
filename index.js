@@ -420,11 +420,21 @@ function champBtnsForCat(lobby, catKey) {
   const fullKey  = Object.keys(CHAMP_CATEGORIES).find(k => k.includes(catKey));
   const myBans   = s.team === "A" ? lobby.bans.A : lobby.bans.B;
   const oppBans  = s.team === "A" ? lobby.bans.B : lobby.bans.A;
-  const excluded = isBan ? myBans : oppBans;
+  const myPicks  = lobby.picks[s.team];
   const allPicked = [...lobby.picks.A, ...lobby.picks.B];
-  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
-    !excluded.includes(c) && !allPicked.includes(c) && lobby.available.includes(c)
-  );
+
+  let available;
+  if (isBan) {
+    // Ban phase: hide own bans + already picked champs (no point banning them)
+    available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
+      !myBans.includes(c) && !allPicked.includes(c) && lobby.available.includes(c)
+    );
+  } else {
+    // Pick phase: hide opponent bans against us + own team's picks (opponent picks stay available)
+    available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
+      !oppBans.includes(c) && !myPicks.includes(c) && lobby.available.includes(c)
+    );
+  }
 
   const rows = [];
   for (let i = 0; i < available.length && rows.length < 3; i += 5) {
@@ -511,10 +521,10 @@ async function startDraftStep(lobby) {
       ).catch(() => {});
     } else {
       const oppBans = s.team === "A" ? lobby.bans.B : lobby.bans.A;
-      const pool  = lobby.available.filter(c => !oppBans.includes(c));
+      const myPicks = lobby.picks[s.team];
+      const pool  = lobby.available.filter(c => !oppBans.includes(c) && !myPicks.includes(c));
       const champ = pool[Math.floor(Math.random() * pool.length)] ?? lobby.available[0];
       lobby.picks[s.team].push(champ);
-      lobby.available = lobby.available.filter(c => c !== champ);
       log("INFO", `Auto-pick L${lobby.lobbyId}: ${champ} ${teamLabel(lobby, s.team)}`);
       await lobby.draftChannel.send(
         `⏱️ Time's up! **${champ}** was automatically **picked** for ${teamLabel(lobby, s.team)} (<@${cap}>).`
@@ -1391,14 +1401,16 @@ client.on("interactionCreate", async interaction => {
 
     const champ   = rest.replace("pick_", "");
     const oppBans = s.team === "A" ? lobby.bans.B : lobby.bans.A;
+    const myPicks = lobby.picks[s.team];
     if (oppBans.includes(champ) && !lobby.bans[s.team].includes(champ))
       return interaction.reply({ content: "❌ This champion was banned for your team.", ephemeral: true });
     if (!lobby.available.includes(champ))
-      return interaction.reply({ content: "❌ This champion is unavailable (already picked or double-banned).", ephemeral: true });
+      return interaction.reply({ content: "❌ This champion is unavailable (double-banned).", ephemeral: true });
+    if (myPicks.includes(champ))
+      return interaction.reply({ content: "❌ Your team already picked this champion.", ephemeral: true });
 
     await interaction.deferUpdate().catch(() => {});
     lobby.picks[s.team].push(champ);
-    lobby.available = lobby.available.filter(c => c !== champ);
     log("INFO", `L${lobby.lobbyId}: ${teamLabel(lobby, s.team)} picked ${champ}`);
     advanceDraft(lobby);
     return;
@@ -1443,48 +1455,6 @@ client.once("ready", async () => {
       log("WARN", `ensureRoles failed for ${guild.name}:`, err)
     );
   }
-
-  // ─── WATCHDOG ────────────────────────────────────────────────
-  // Checks every 60s for stuck lobbies (>20 min in any phase)
-  const WATCHDOG_INTERVAL = 60 * 1000;
-  const MAX_LOBBY_AGE     = 20 * 60 * 1000;
-
-  setInterval(async () => {
-    try {
-      for (const [lobbyId, lobby] of [...lobbies]) {
-        if (!lobby.active) continue;
-
-        // Check if lobby voice has been waiting too long (beyond timeout + buffer)
-        if (lobby.phase === "waiting" && lobby.lobbyVoice) {
-          const created = lobby.lobbyVoice.createdTimestamp;
-          if (created && Date.now() - created > LOBBY_TIMEOUT * 1000 + 30000) {
-            log("WARN", `Watchdog: Lobby #${lobbyId} stuck in waiting — cleaning up.`);
-            if (lobby.channel) {
-              await lobby.channel.send(`⚠️ **Lobby #${lobbyId}** was stuck and has been auto-cancelled.`).catch(() => {});
-            }
-            await cleanupLobby(lobby);
-            continue;
-          }
-        }
-
-        // Check if draft/vote phase has been running too long
-        if (["draft", "vote", "starting"].includes(lobby.phase) && lobby.category) {
-          const created = lobby.category.createdTimestamp;
-          if (created && Date.now() - created > MAX_LOBBY_AGE) {
-            log("WARN", `Watchdog: Lobby #${lobbyId} exceeded ${MAX_LOBBY_AGE / 60000} min — auto-cancelling.`);
-            if (lobby.channel) {
-              await lobby.channel.send(`⚠️ **Lobby #${lobbyId}** timed out after 20 minutes and has been auto-cancelled.`).catch(() => {});
-            }
-            await cancelMatch(lobby);
-            continue;
-          }
-        }
-      }
-    } catch (err) {
-      log("ERROR", "Watchdog error:", err);
-    }
-  }, WATCHDOG_INTERVAL);
-  log("INFO", "Watchdog started — checking every 60s for stuck lobbies.");
 });
 
 // ─── LOGIN ───────────────────────────────────────────────────────────
