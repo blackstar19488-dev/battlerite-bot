@@ -32,9 +32,21 @@ function saveStats() {
     if (_saving) return;
     _saving = true;
     try {
+      // Backup before writing
+      if (fs.existsSync("./stats.json")) {
+        await fs.promises.copyFile("./stats.json", "./stats.backup.json");
+      }
       await fs.promises.writeFile("./stats.json", JSON.stringify(stats, null, 2));
     } catch (err) {
       log("ERROR", "Failed to save stats:", err);
+      // Try to restore from backup
+      if (fs.existsSync("./stats.backup.json")) {
+        try {
+          const backup = JSON.parse(await fs.promises.readFile("./stats.backup.json", "utf8"));
+          stats = backup;
+          log("INFO", "Stats restored from backup.");
+        } catch (e) { log("ERROR", "Backup restore failed:", e); }
+      }
     }
     _saving = false;
   }, 500);
@@ -110,6 +122,7 @@ async function removeRole(guild, userId, role) {
 
 // ─── QUEUE STATE ─────────────────────────────────────────────────────
 let queue = [];
+let _queueLock = false;
 const queueMessages = {};
 
 // ─── LOBBY STATE ─────────────────────────────────────────────────────
@@ -597,11 +610,25 @@ async function startLobby(channel, lobbyId) {
     const inVoice = lobby.lobbyVoice
       ? [...lobby.lobbyVoice.members.values()].map(m => m.id) : [];
     const missing = lobby.expected.filter(id => !inVoice.includes(id));
-    log("INFO", `Lobby #${lobbyId} expired. Missing: ${missing.join(", ")}`);
+    const present = lobby.expected.filter(id => inVoice.includes(id));
+    log("INFO", `Lobby #${lobbyId} expired. Missing: ${missing.join(", ")} | Present: ${present.join(", ")}`);
+
+    // Re-queue the players who showed up
+    for (const id of present) {
+      if (!queue.includes(id)) {
+        queue.push(id);
+        await addRole(channel.guild, id, inQueueRole);
+      }
+    }
+    // Remove IN QUEUE role from missing players (they didn't show up)
+    for (const id of missing) {
+      await removeRole(channel.guild, id, inQueueRole);
+    }
+
     await channel.send(
       `⌛ **Lobby #${lobbyId}** expired after **${LOBBY_TIMEOUT}s**.\n` +
       `Missing: ${missing.map(id => `<@${id}>`).join(", ")}\n` +
-      `Use \`!queue\` to start a new queue.`
+      `${present.length > 0 ? `${present.map(id => `<@${id}>`).join(", ")} have been re-added to the queue.` : ""}`
     ).catch(() => {});
     await cleanupLobby(lobby);
   }, LOBBY_TIMEOUT * 1000);
@@ -609,15 +636,19 @@ async function startLobby(channel, lobbyId) {
 
 // ─── VOICE LISTENER ──────────────────────────────────────────────────
 client.on("voiceStateUpdate", async (oldState, newState) => {
-  for (const [lobbyId, lobby] of lobbies) {
-    if (!lobby.active || lobby.phase !== "waiting" || !lobby.lobbyVoice) continue;
-    const inVoice = [...lobby.lobbyVoice.members.values()].map(m => m.id);
-    if (lobby.expected.every(id => inVoice.includes(id)) && inVoice.length >= 6) {
-      startMatch(lobby).catch(err => {
-        log("ERROR", `startMatch error L${lobbyId}:`, err);
-        lobby.channel?.send(`❌ Failed to start Lobby #${lobbyId}. Use \`!cancel\` to reset.`);
-      });
+  try {
+    for (const [lobbyId, lobby] of lobbies) {
+      if (!lobby.active || lobby.phase !== "waiting" || !lobby.lobbyVoice) continue;
+      const inVoice = [...lobby.lobbyVoice.members.values()].map(m => m.id);
+      if (lobby.expected.every(id => inVoice.includes(id)) && inVoice.length >= 6) {
+        startMatch(lobby).catch(err => {
+          log("ERROR", `startMatch error L${lobbyId}:`, err);
+          lobby.channel?.send(`❌ Failed to start Lobby #${lobbyId}. Use \`!cancel\` to reset.`);
+        });
+      }
     }
+  } catch (err) {
+    log("ERROR", "voiceStateUpdate error:", err);
   }
 });
 
@@ -865,52 +896,55 @@ async function cleanupLobby(lobby) {
 
 // ─── COMMANDS ────────────────────────────────────────────────────────
 client.on("messageCreate", async msg => {
+  try {
   if (msg.author.bot) return;
 
   if (msg.content === "!queue") {
-    await ensureRoles(msg.guild);
-    const userId = msg.author.id;
+    if (_queueLock) return;
+    _queueLock = true;
 
-    // Find the designated queue channel
-    const queueChannel = msg.guild.channels.cache.find(
-      c => c.name === "queue-lobby-elo" && c.isTextBased()
-    );
-    const isQueueChannel = queueChannel && msg.channel.id === queueChannel.id;
+    try {
+      await ensureRoles(msg.guild);
+      const userId = msg.author.id;
 
-    // Auto-join the player if possible
-    let joined = false;
-    if (!bothLobbiesActive()
-        && !queue.includes(userId)
-        && !findLobbyByPlayer(userId)
-        && !findLobbyByExpected(userId)
-        && queue.length < 6) {
-      ensurePlayer(userId);
-      queue.push(userId);
-      await addRole(msg.guild, userId, inQueueRole);
-      joined = true;
-    }
+      // Find the designated queue channel
+      const queueChannel = msg.guild.channels.cache.find(
+        c => c.name === "queue-lobby-elo" && c.isTextBased()
+      );
+      const isQueueChannel = queueChannel && msg.channel.id === queueChannel.id;
 
-    if (isQueueChannel) {
-      // In the queue channel → show/refresh the embed here
-      await refreshQueue(msg.channel, false);
-    } else if (queueChannel) {
-      // In another channel → just update the embed in queue-lobby-elo silently
-      await refreshQueue(queueChannel, false).catch(() => {});
-    } else {
-      // No queue channel found — fallback to current channel
-      await refreshQueue(msg.channel, false);
-    }
-
-    // Check if queue is full → start lobby
-    if (queue.length === 6) {
-      const slot = getFreeLobbySlot();
-      const lobbyChannel = isQueueChannel ? msg.channel : (queueChannel || msg.channel);
-      if (slot) {
-        startLobby(lobbyChannel, slot).catch(err => {
-          log("ERROR", "startLobby error:", err);
-          lobbyChannel.send("❌ Failed to create lobby. Use `!cancel` to reset.");
-        });
+      // Auto-join the player if possible
+      if (!bothLobbiesActive()
+          && !queue.includes(userId)
+          && !findLobbyByPlayer(userId)
+          && !findLobbyByExpected(userId)
+          && queue.length < 6) {
+        ensurePlayer(userId);
+        queue.push(userId);
+        await addRole(msg.guild, userId, inQueueRole);
       }
+
+      if (isQueueChannel) {
+        await refreshQueue(msg.channel, false);
+      } else if (queueChannel) {
+        await refreshQueue(queueChannel, false).catch(() => {});
+      } else {
+        await refreshQueue(msg.channel, false);
+      }
+
+      // Check if queue is full → start lobby
+      if (queue.length >= 6) {
+        const slot = getFreeLobbySlot();
+        const lobbyChannel = isQueueChannel ? msg.channel : (queueChannel || msg.channel);
+        if (slot) {
+          startLobby(lobbyChannel, slot).catch(err => {
+            log("ERROR", "startLobby error:", err);
+            lobbyChannel.send("❌ Failed to create lobby. Use `!cancel` to reset.");
+          });
+        }
+      }
+    } finally {
+      _queueLock = false;
     }
     return;
   }
@@ -1126,55 +1160,82 @@ client.on("messageCreate", async msg => {
     const activeIds = [...lobbies.keys()].join(", ");
     return msg.reply(`❌ Please specify which lobby to cancel: \`!cancel 1\` or \`!cancel 2\`\nActive lobbies: **#${activeIds}**`);
   }
+  } catch (err) {
+    log("ERROR", "messageCreate error:", err);
+  }
 });
 
 // ─── BUTTON INTERACTIONS ─────────────────────────────────────────────
 client.on("interactionCreate", async interaction => {
+  try {
   if (!interaction.isButton()) return;
   const cid = interaction.customId;
 
   // ─── QUEUE BUTTONS ─────────────────────────────────────────
   if (cid === "q_join") {
-    if (bothLobbiesActive())
-      return interaction.reply({
-        content: "⏳ Both lobbies are in progress. Please wait for one to finish.",
-        ephemeral: true
-      });
+    if (_queueLock)
+      return interaction.reply({ content: "⏳ Processing, try again in a moment.", ephemeral: true });
+    _queueLock = true;
 
-    await ensureRoles(interaction.guild);
-    ensurePlayer(interaction.user.id);
-
-    if (findLobbyByPlayer(interaction.user.id) || findLobbyByExpected(interaction.user.id))
-      return interaction.reply({ content: "❌ You're already in an active match.", ephemeral: true });
-    if (queue.includes(interaction.user.id))
-      return interaction.reply({ content: "You're already in the queue.", ephemeral: true });
-    if (queue.length >= 6)
-      return interaction.reply({ content: "The queue is full.", ephemeral: true });
-
-    queue.push(interaction.user.id);
-    await addRole(interaction.guild, interaction.user.id, inQueueRole);
-    await interaction.update({ embeds: [queueEmbed()], components: [queueBtns(false)] });
-
-    if (queue.length === 6) {
-      const slot = getFreeLobbySlot();
-      if (slot) {
-        await interaction.message.edit({
-          embeds: [queueEmbed()], components: [queueBtns(true)]
-        }).catch(() => {});
-        startLobby(interaction.channel, slot).catch(err => {
-          log("ERROR", "startLobby error:", err);
-          interaction.channel?.send("❌ Failed to create lobby. Use `!cancel` to reset.");
+    try {
+      if (bothLobbiesActive()) {
+        _queueLock = false;
+        return interaction.reply({
+          content: "⏳ Both lobbies are in progress. Please wait for one to finish.",
+          ephemeral: true
         });
       }
+
+      await ensureRoles(interaction.guild);
+      ensurePlayer(interaction.user.id);
+
+      if (findLobbyByPlayer(interaction.user.id) || findLobbyByExpected(interaction.user.id)) {
+        _queueLock = false;
+        return interaction.reply({ content: "❌ You're already in an active match.", ephemeral: true });
+      }
+      if (queue.includes(interaction.user.id)) {
+        _queueLock = false;
+        return interaction.reply({ content: "You're already in the queue.", ephemeral: true });
+      }
+      if (queue.length >= 6) {
+        _queueLock = false;
+        return interaction.reply({ content: "The queue is full.", ephemeral: true });
+      }
+
+      queue.push(interaction.user.id);
+      await addRole(interaction.guild, interaction.user.id, inQueueRole);
+      await interaction.update({ embeds: [queueEmbed()], components: [queueBtns(false)] });
+
+      if (queue.length >= 6) {
+        const slot = getFreeLobbySlot();
+        if (slot) {
+          await interaction.message.edit({
+            embeds: [queueEmbed()], components: [queueBtns(true)]
+          }).catch(() => {});
+          startLobby(interaction.channel, slot).catch(err => {
+            log("ERROR", "startLobby error:", err);
+            interaction.channel?.send("❌ Failed to create lobby. Use `!cancel` to reset.");
+          });
+        }
+      }
+    } finally {
+      _queueLock = false;
     }
     return;
   }
 
   if (cid === "q_leave") {
-    const wasIn = queue.includes(interaction.user.id);
-    queue = queue.filter(id => id !== interaction.user.id);
-    if (wasIn) await removeRole(interaction.guild, interaction.user.id, inQueueRole);
-    await interaction.update({ embeds: [queueEmbed()], components: [queueBtns(false)] });
+    if (_queueLock)
+      return interaction.reply({ content: "⏳ Processing, try again in a moment.", ephemeral: true });
+    _queueLock = true;
+    try {
+      const wasIn = queue.includes(interaction.user.id);
+      queue = queue.filter(id => id !== interaction.user.id);
+      if (wasIn) await removeRole(interaction.guild, interaction.user.id, inQueueRole);
+      await interaction.update({ embeds: [queueEmbed()], components: [queueBtns(false)] });
+    } finally {
+      _queueLock = false;
+    }
     return;
   }
 
@@ -1340,6 +1401,11 @@ client.on("interactionCreate", async interaction => {
     }
     return;
   }
+  } catch (err) {
+    log("ERROR", "interactionCreate error:", err);
+    if (interaction.deferred || interaction.replied) return;
+    interaction.reply({ content: "❌ An error occurred. Try again.", ephemeral: true }).catch(() => {});
+  }
 });
 
 // ─── READY ───────────────────────────────────────────────────────────
@@ -1350,6 +1416,48 @@ client.once("ready", async () => {
       log("WARN", `ensureRoles failed for ${guild.name}:`, err)
     );
   }
+
+  // ─── WATCHDOG ────────────────────────────────────────────────
+  // Checks every 60s for stuck lobbies (>20 min in any phase)
+  const WATCHDOG_INTERVAL = 60 * 1000;
+  const MAX_LOBBY_AGE     = 20 * 60 * 1000;
+
+  setInterval(async () => {
+    try {
+      for (const [lobbyId, lobby] of [...lobbies]) {
+        if (!lobby.active) continue;
+
+        // Check if lobby voice has been waiting too long (beyond timeout + buffer)
+        if (lobby.phase === "waiting" && lobby.lobbyVoice) {
+          const created = lobby.lobbyVoice.createdTimestamp;
+          if (created && Date.now() - created > LOBBY_TIMEOUT * 1000 + 30000) {
+            log("WARN", `Watchdog: Lobby #${lobbyId} stuck in waiting — cleaning up.`);
+            if (lobby.channel) {
+              await lobby.channel.send(`⚠️ **Lobby #${lobbyId}** was stuck and has been auto-cancelled.`).catch(() => {});
+            }
+            await cleanupLobby(lobby);
+            continue;
+          }
+        }
+
+        // Check if draft/vote phase has been running too long
+        if (["draft", "vote", "starting"].includes(lobby.phase) && lobby.category) {
+          const created = lobby.category.createdTimestamp;
+          if (created && Date.now() - created > MAX_LOBBY_AGE) {
+            log("WARN", `Watchdog: Lobby #${lobbyId} exceeded ${MAX_LOBBY_AGE / 60000} min — auto-cancelling.`);
+            if (lobby.channel) {
+              await lobby.channel.send(`⚠️ **Lobby #${lobbyId}** timed out after 20 minutes and has been auto-cancelled.`).catch(() => {});
+            }
+            await cancelMatch(lobby);
+            continue;
+          }
+        }
+      }
+    } catch (err) {
+      log("ERROR", "Watchdog error:", err);
+    }
+  }, WATCHDOG_INTERVAL);
+  log("INFO", "Watchdog started — checking every 60s for stuck lobbies.");
 });
 
 // ─── LOGIN ───────────────────────────────────────────────────────────
