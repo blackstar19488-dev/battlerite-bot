@@ -867,15 +867,58 @@ async function cleanupLobby(lobby) {
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
 
-  if (queueMessages[msg.channel.id] && !findLobbyByDraftChannel(msg.channel.id)) {
-    setTimeout(async () => {
-      await refreshQueue(msg.channel, false).catch(() => {});
-    }, 600);
-  }
-
   if (msg.content === "!queue") {
     await ensureRoles(msg.guild);
-    await refreshQueue(msg.channel, false);
+    const userId = msg.author.id;
+
+    // Find the designated queue channel
+    const queueChannel = msg.guild.channels.cache.find(
+      c => c.name === "queue-lobby-elo" && c.isTextBased()
+    );
+    const isQueueChannel = queueChannel && msg.channel.id === queueChannel.id;
+
+    // Auto-join the player if possible
+    let joined = false;
+    if (!bothLobbiesActive()
+        && !queue.includes(userId)
+        && !findLobbyByPlayer(userId)
+        && !findLobbyByExpected(userId)
+        && queue.length < 6) {
+      ensurePlayer(userId);
+      queue.push(userId);
+      await addRole(msg.guild, userId, inQueueRole);
+      joined = true;
+    }
+
+    if (isQueueChannel) {
+      // In the queue channel → show/refresh the embed here
+      await refreshQueue(msg.channel, false);
+    } else if (queueChannel) {
+      // In another channel → update the embed in queue-lobby-elo silently
+      await refreshQueue(queueChannel, false).catch(() => {});
+      if (joined) {
+        await msg.reply(`✅ You joined the queue! (${queue.length}/6) — Check <#${queueChannel.id}>`);
+      } else if (queue.includes(userId)) {
+        await msg.reply(`You're already in the queue. (${queue.length}/6) — Check <#${queueChannel.id}>`);
+      } else {
+        await msg.reply(`❌ Can't join right now. Check <#${queueChannel.id}> for details.`);
+      }
+    } else {
+      // No queue channel found — fallback to current channel
+      await refreshQueue(msg.channel, false);
+    }
+
+    // Check if queue is full → start lobby
+    if (queue.length === 6) {
+      const slot = getFreeLobbySlot();
+      const lobbyChannel = isQueueChannel ? msg.channel : (queueChannel || msg.channel);
+      if (slot) {
+        startLobby(lobbyChannel, slot).catch(err => {
+          log("ERROR", "startLobby error:", err);
+          lobbyChannel.send("❌ Failed to create lobby. Use `!cancel` to reset.");
+        });
+      }
+    }
     return;
   }
 
