@@ -215,12 +215,11 @@ function timerBar(sec) {
 
 function progressBar(lobby) {
   const parts = DRAFT_SEQ.map((x, i) => {
-    if (i < lobby.draftStep) return x.type === "ban" ? "\u001b[1;31m▰" : "\u001b[1;34m▰";
-    if (i === lobby.draftStep) return "\u001b[1;37m▰";
-    return "\u001b[0;30m▱";
+    if (i < lobby.draftStep) return x.type === "ban" ? "🔴" : "🔵";
+    if (i === lobby.draftStep) return "⚪";
+    return "▱";
   });
-  return "```ansi\n" + parts.join("") + "\u001b[0m  " +
-    (lobby.draftStep + 1) + " / " + DRAFT_SEQ.length + "\n```";
+  return parts.join("") + `  *${lobby.draftStep + 1} / ${DRAFT_SEQ.length}*`;
 }
 
 // ─── ELO CALCULATION ─────────────────────────────────────────────────
@@ -317,6 +316,22 @@ async function refreshQueue(channel, locked = false) {
   }
   const ex = queueMessages[channel.id];
   if (ex) { await ex.delete().catch(() => {}); delete queueMessages[channel.id]; }
+
+  // Clean up old bot queue embeds (e.g. after bot restart when queueMessages is lost)
+  try {
+    const recent = await channel.messages.fetch({ limit: 20 });
+    const oldEmbeds = recent.filter(m =>
+      m.author.id === client.user.id &&
+      m.embeds.length > 0 &&
+      m.embeds[0].title?.includes("Queue")
+    );
+    for (const [, m] of oldEmbeds) {
+      await m.delete().catch(() => {});
+    }
+  } catch (err) {
+    log("WARN", "Failed to clean old queue embeds:", err);
+  }
+
   queueMessages[channel.id] = await channel.send({
     embeds: [queueEmbed()], components: [queueBtns(locked)]
   });
@@ -406,7 +421,10 @@ function champBtnsForCat(lobby, catKey) {
   const myBans   = s.team === "A" ? lobby.bans.A : lobby.bans.B;
   const oppBans  = s.team === "A" ? lobby.bans.B : lobby.bans.A;
   const excluded = isBan ? myBans : oppBans;
-  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => !excluded.includes(c));
+  const allPicked = [...lobby.picks.A, ...lobby.picks.B];
+  const available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
+    !excluded.includes(c) && !allPicked.includes(c) && lobby.available.includes(c)
+  );
 
   const rows = [];
   for (let i = 0; i < available.length && rows.length < 3; i += 5) {
@@ -460,14 +478,14 @@ async function startDraftStep(lobby) {
   }
 
   lobby.timerInterval = setInterval(async () => {
-    lobby.timerSeconds -= 3;
+    lobby.timerSeconds -= 5;
     if (lobby.timerSeconds <= 0) {
       clearInterval(lobby.timerInterval);
       lobby.timerInterval = null;
       return;
     }
     await pushBoard(lobby);
-  }, 3000);
+  }, 5000);
 
   lobby.timerTimeout = setTimeout(async () => {
     stopTimer(lobby);
@@ -478,7 +496,8 @@ async function startDraftStep(lobby) {
     const opponent = s.team === "A" ? "B" : "A";
 
     if (s.type === "ban") {
-      const pool  = CHAMPS.filter(c => !lobby.bans[s.team].includes(c));
+      const allPicked = [...lobby.picks.A, ...lobby.picks.B];
+      const pool  = CHAMPS.filter(c => !lobby.bans[s.team].includes(c) && !allPicked.includes(c));
       const champ = pool[Math.floor(Math.random() * pool.length)];
       lobby.bans[s.team].push(champ);
       if (lobby.bans[opponent].includes(champ)) {
@@ -495,6 +514,7 @@ async function startDraftStep(lobby) {
       const pool  = lobby.available.filter(c => !oppBans.includes(c));
       const champ = pool[Math.floor(Math.random() * pool.length)] ?? lobby.available[0];
       lobby.picks[s.team].push(champ);
+      lobby.available = lobby.available.filter(c => c !== champ);
       log("INFO", `Auto-pick L${lobby.lobbyId}: ${champ} ${teamLabel(lobby, s.team)}`);
       await lobby.draftChannel.send(
         `⏱️ Time's up! **${champ}** was automatically **picked** for ${teamLabel(lobby, s.team)} (<@${cap}>).`
@@ -902,6 +922,9 @@ client.on("messageCreate", async msg => {
   if (msg.content === "!queue") {
     if (_queueLock) return;
     _queueLock = true;
+
+    // Delete the user's !queue message to keep channel clean
+    await msg.delete().catch(() => {});
 
     try {
       await ensureRoles(msg.guild);
@@ -1336,6 +1359,9 @@ client.on("interactionCreate", async interaction => {
     const champ = rest.replace("ban_", "");
     if (lobby.bans[s.team].includes(champ))
       return interaction.reply({ content: "❌ Your team already banned this champion.", ephemeral: true });
+    const allPicked = [...lobby.picks.A, ...lobby.picks.B];
+    if (allPicked.includes(champ))
+      return interaction.reply({ content: "❌ This champion has already been picked.", ephemeral: true });
 
     await interaction.deferUpdate().catch(() => {});
     lobby.bans[s.team].push(champ);
@@ -1368,10 +1394,11 @@ client.on("interactionCreate", async interaction => {
     if (oppBans.includes(champ) && !lobby.bans[s.team].includes(champ))
       return interaction.reply({ content: "❌ This champion was banned for your team.", ephemeral: true });
     if (!lobby.available.includes(champ))
-      return interaction.reply({ content: "❌ This champion was double-banned and is unavailable.", ephemeral: true });
+      return interaction.reply({ content: "❌ This champion is unavailable (already picked or double-banned).", ephemeral: true });
 
     await interaction.deferUpdate().catch(() => {});
     lobby.picks[s.team].push(champ);
+    lobby.available = lobby.available.filter(c => c !== champ);
     log("INFO", `L${lobby.lobbyId}: ${teamLabel(lobby, s.team)} picked ${champ}`);
     advanceDraft(lobby);
     return;
