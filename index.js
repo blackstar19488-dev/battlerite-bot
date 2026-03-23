@@ -809,6 +809,12 @@ async function finishMatch(lobby, winner) {
 
   const changes = {};
 
+  // Carry protection: find the 2 lowest ELO players among all 6
+  const allPlayers = [...lobby.teamA, ...lobby.teamB];
+  const sorted = [...allPlayers].sort((a, b) => (stats[a]?.elo ?? 1000) - (stats[b]?.elo ?? 1000));
+  const lowest2 = [sorted[0], sorted[1]];
+  const loserHasBothLowest = lowest2.every(id => losers.includes(id));
+
   winners.forEach(id => {
     ensurePlayer(id);
     const r = calculateElo(stats[id].elo, avgLoseElo, true, stats[id].winstreak);
@@ -822,8 +828,14 @@ async function finishMatch(lobby, winner) {
   losers.forEach(id => {
     ensurePlayer(id);
     const r = calculateElo(stats[id].elo, avgWinElo, false, stats[id].winstreak);
-    changes[id] = r.change;
-    stats[id].elo = r.newElo;
+    let change = r.change;
+    // Carry protection: 23% less loss if 17+ games and stuck with 2 lowest ELO
+    if (loserHasBothLowest && stats[id].games >= 17 && !lowest2.includes(id)) {
+      change = Math.round(change * 0.77);
+      if (change === 0) change = -1;
+    }
+    changes[id] = change;
+    stats[id].elo = Math.max(100, stats[id].elo + change);
     stats[id].losses++;
     stats[id].games++;
     stats[id].winstreak = 0;
