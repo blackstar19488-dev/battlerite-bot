@@ -29,36 +29,37 @@ let _saving = false;
 function saveStats() {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(async () => {
-    if (_saving) return;
-    _saving = true;
-    try {
-      // Backup before writing
-      if (fs.existsSync("./stats.json")) {
-        await fs.promises.copyFile("./stats.json", "./stats.backup.json");
-      }
-      await fs.promises.writeFile("./stats.json", JSON.stringify(stats, null, 2));
-    } catch (err) {
-      log("ERROR", "Failed to save stats:", err);
-      // Try to restore from backup
-      if (fs.existsSync("./stats.backup.json")) {
-        try {
-          const backup = JSON.parse(await fs.promises.readFile("./stats.backup.json", "utf8"));
-          stats = backup;
-          log("INFO", "Stats restored from backup.");
-        } catch (e) { log("ERROR", "Backup restore failed:", e); }
-      }
-    }
-    _saving = false;
+    await _doSave();
   }, 500);
+}
+
+async function saveStatsNow() {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  await _doSave();
+}
+
+async function _doSave() {
+  if (_saving) return;
+  _saving = true;
+  try {
+    await fs.promises.writeFile("./stats.json", JSON.stringify(stats, null, 2));
+  } catch (err) {
+    log("ERROR", "Failed to save stats:", err);
+  }
+  _saving = false;
 }
 
 function ensurePlayer(id) {
   if (!stats[id]) {
-    stats[id] = { elo: 1000, wins: 0, losses: 0, games: 0 };
+    stats[id] = { elo: 1000, wins: 0, losses: 0, games: 0, winstreak: 0 };
     saveStats();
   }
   if (stats[id].games === undefined) {
     stats[id].games = stats[id].wins + stats[id].losses;
+    saveStats();
+  }
+  if (stats[id].winstreak === undefined) {
+    stats[id].winstreak = 0;
     saveStats();
   }
 }
@@ -223,15 +224,16 @@ function progressBar(lobby) {
 }
 
 // ─── ELO CALCULATION ─────────────────────────────────────────────────
-function calculateElo(playerElo, avgOppElo, won, gamesPlayed) {
-  let K;
-  if (gamesPlayed < 10)      K = 40;
-  else if (playerElo < 1200) K = 30;
-  else                        K = 20;
+function calculateElo(playerElo, avgOppElo, won, winstreak) {
+  const K = playerElo < 1200 ? 30 : 20;
 
   const E = 1 / (1 + Math.pow(10, (avgOppElo - playerElo) / 400));
   const S = won ? 1 : 0;
-  const change = Math.round(K * (S - E));
+  let change = Math.round(K * (S - E));
+  // Always at least ±1 to avoid showing +0
+  if (change === 0) change = won ? 1 : -1;
+  // Winstreak nerf: cap gains at +8 after 6 consecutive wins
+  if (won && winstreak >= 6 && change > 8) change = 8;
   return { newElo: Math.max(100, playerElo + change), change };
 }
 
@@ -421,16 +423,15 @@ function champBtnsForCat(lobby, catKey) {
   const myBans   = s.team === "A" ? lobby.bans.A : lobby.bans.B;
   const oppBans  = s.team === "A" ? lobby.bans.B : lobby.bans.A;
   const myPicks  = lobby.picks[s.team];
-  const allPicked = [...lobby.picks.A, ...lobby.picks.B];
 
   let available;
   if (isBan) {
-    // Ban phase: hide own bans + already picked champs (no point banning them)
+    // Ban phase: only hide champs already banned by my team
     available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
-      !myBans.includes(c) && !allPicked.includes(c) && lobby.available.includes(c)
+      !myBans.includes(c)
     );
   } else {
-    // Pick phase: hide opponent bans against us + own team's picks (opponent picks stay available)
+    // Pick phase: hide opponent bans against us + own team's picks + double-banned champs
     available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
       !oppBans.includes(c) && !myPicks.includes(c) && lobby.available.includes(c)
     );
@@ -506,8 +507,7 @@ async function startDraftStep(lobby) {
     const opponent = s.team === "A" ? "B" : "A";
 
     if (s.type === "ban") {
-      const allPicked = [...lobby.picks.A, ...lobby.picks.B];
-      const pool  = CHAMPS.filter(c => !lobby.bans[s.team].includes(c) && !allPicked.includes(c));
+      const pool  = CHAMPS.filter(c => !lobby.bans[s.team].includes(c));
       const champ = pool[Math.floor(Math.random() * pool.length)];
       lobby.bans[s.team].push(champ);
       if (lobby.bans[opponent].includes(champ)) {
@@ -628,6 +628,15 @@ async function startLobby(channel, lobbyId) {
     allowedMentions: { users: lobby.expected }
   }).catch(err => { log("ERROR", "Lobby ping failed:", err); return null; });
 
+  // DM all 6 players
+  for (const id of lobby.expected) {
+    const member = await guild.members.fetch(id).catch(() => null);
+    if (member) {
+      await member.send(`🎮 **Lobby #${lobbyId} is ready!** Join the voice channel **🔊 LOBBY #${lobbyId} — JOIN** to start the match.`)
+        .catch(() => {}); // Silently ignore if DMs are closed
+    }
+  }
+
   lobby.lobbyVoice = await guild.channels.create({
     name: `🔊 LOBBY #${lobbyId} — JOIN`,
     type: ChannelType.GuildVoice
@@ -667,14 +676,21 @@ async function startLobby(channel, lobbyId) {
 // ─── VOICE LISTENER ──────────────────────────────────────────────────
 client.on("voiceStateUpdate", async (oldState, newState) => {
   try {
-    for (const [lobbyId, lobby] of lobbies) {
+    for (const [lobbyId, lobby] of [...lobbies]) {
+      // Verify lobby still exists in map (could be deleted by resetlobby)
+      if (!lobbies.has(lobbyId)) continue;
       if (!lobby.active || lobby.phase !== "waiting" || !lobby.lobbyVoice) continue;
-      const inVoice = [...lobby.lobbyVoice.members.values()].map(m => m.id);
-      if (lobby.expected.every(id => inVoice.includes(id)) && inVoice.length >= 6) {
-        startMatch(lobby).catch(err => {
-          log("ERROR", `startMatch error L${lobbyId}:`, err);
-          lobby.channel?.send(`❌ Failed to start Lobby #${lobbyId}. Use \`!cancel\` to reset.`);
-        });
+      try {
+        const inVoice = [...lobby.lobbyVoice.members.values()].map(m => m.id);
+        if (lobby.expected.every(id => inVoice.includes(id)) && inVoice.length >= 6) {
+          startMatch(lobby).catch(err => {
+            log("ERROR", `startMatch error L${lobbyId}:`, err);
+            lobby.channel?.send(`❌ Failed to start Lobby #${lobbyId}. Use \`!cancel\` to reset.`);
+          });
+        }
+      } catch (e) {
+        // lobbyVoice may have been deleted during iteration
+        log("WARN", `Voice check failed L${lobbyId}:`, e.message);
       }
     }
   } catch (err) {
@@ -685,6 +701,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 // ─── START MATCH ─────────────────────────────────────────────────────
 async function startMatch(lobby) {
   if (lobby.phase !== "waiting") return;
+  if (!lobbies.has(lobby.lobbyId)) return;
   lobby.phase = "starting";
   clearTimeout(lobby.lobbyTimeout);
   lobby.lobbyTimeout = null;
@@ -794,23 +811,25 @@ async function finishMatch(lobby, winner) {
 
   winners.forEach(id => {
     ensurePlayer(id);
-    const r = calculateElo(stats[id].elo, avgLoseElo, true, stats[id].games);
+    const r = calculateElo(stats[id].elo, avgLoseElo, true, stats[id].winstreak);
     changes[id] = r.change;
     stats[id].elo = r.newElo;
     stats[id].wins++;
     stats[id].games++;
+    stats[id].winstreak++;
   });
 
   losers.forEach(id => {
     ensurePlayer(id);
-    const r = calculateElo(stats[id].elo, avgWinElo, false, stats[id].games);
+    const r = calculateElo(stats[id].elo, avgWinElo, false, stats[id].winstreak);
     changes[id] = r.change;
     stats[id].elo = r.newElo;
     stats[id].losses++;
     stats[id].games++;
+    stats[id].winstreak = 0;
   });
 
-  saveStats();
+  await saveStatsNow();
 
   const resultEmbed = new EmbedBuilder()
     .setTitle(`🏆  ${winLabel} Wins! — Lobby #${lobby.lobbyId}`)
@@ -878,6 +897,9 @@ async function finishMatch(lobby, winner) {
 // ─── CANCEL MATCH ────────────────────────────────────────────────────
 async function cancelMatch(lobby) {
   log("INFO", `Lobby #${lobby.lobbyId} cancelled.`);
+  // Deactivate immediately to prevent any other handler from acting on this lobby
+  lobby.active = false;
+  lobby.phase = null;
 
   const guild = lobby.channel.guild;
   const allPlayers = [...new Set([...lobby.teamA, ...lobby.teamB, ...lobby.expected])];
@@ -982,6 +1004,47 @@ client.on("messageCreate", async msg => {
     return;
   }
 
+  if (msg.content.startsWith("!clearqueue")) {
+    if (!ADMIN_IDS.includes(msg.author.id))
+      return msg.reply("❌ You don't have permission to use this command.");
+
+    const mentioned = msg.mentions.users.first();
+
+    if (mentioned) {
+      // Silent remove — delete the command message, no bot message
+      await msg.delete().catch(() => {});
+      if (queue.includes(mentioned.id)) {
+        queue = queue.filter(id => id !== mentioned.id);
+        await removeRole(msg.guild, mentioned.id, inQueueRole);
+        const queueChannel = msg.guild.channels.cache.find(
+          c => c.name === "queue-lobby-elo" && c.isTextBased()
+        );
+        if (queueChannel) await refreshQueue(queueChannel, false).catch(() => {});
+      }
+      return;
+    }
+
+    // No mention → clear entire queue
+    if (queue.length === 0)
+      return msg.reply("Queue is already empty.");
+
+    const count = queue.length;
+    for (const id of queue) {
+      await removeRole(msg.guild, id, inQueueRole);
+    }
+    queue = [];
+
+    const queueChannel = msg.guild.channels.cache.find(
+      c => c.name === "queue-lobby-elo" && c.isTextBased()
+    );
+    if (queueChannel) {
+      await refreshQueue(queueChannel, false).catch(() => {});
+    }
+
+    await msg.channel.send(`🧹 Queue cleared — ${count} player${count > 1 ? "s" : ""} removed. Active matches are not affected.`);
+    return;
+  }
+
   if (msg.content === "!captain") {
     const lobby = findLobbyByDraftChannel(msg.channel.id);
     if (!lobby) return;
@@ -1072,7 +1135,7 @@ client.on("messageCreate", async msg => {
     ensurePlayer(mentioned.id);
     const oldElo = stats[mentioned.id].elo;
     stats[mentioned.id].elo = newElo;
-    saveStats();
+    await saveStatsNow();
 
     log("INFO", `!setelo: ${mentioned.id} ${oldElo} → ${newElo} by ${msg.author.id}`);
     await msg.channel.send({ embeds: [
@@ -1090,9 +1153,9 @@ client.on("messageCreate", async msg => {
 
     const count = Object.keys(stats).length;
     Object.keys(stats).forEach(id => {
-      stats[id] = { elo: 1000, wins: 0, losses: 0, games: 0 };
+      stats[id] = { elo: 1000, wins: 0, losses: 0, games: 0, winstreak: 0 };
     });
-    saveStats();
+    await saveStatsNow();
     log("INFO", `!resetstats by ${msg.author.id} — ${count} players reset`);
 
     await msg.channel.send({ embeds: [
@@ -1132,6 +1195,9 @@ client.on("messageCreate", async msg => {
       await removeRole(msg.guild, id, inQueueRole);
     }
     for (const [, lobby] of lobbies) {
+      // Deactivate immediately to prevent voiceStateUpdate from triggering
+      lobby.active = false;
+      lobby.phase = null;
       const all = [...new Set([...lobby.expected, ...lobby.teamA, ...lobby.teamB])];
       for (const id of all) {
         await removeRole(msg.guild, id, inGameRole);
@@ -1369,9 +1435,6 @@ client.on("interactionCreate", async interaction => {
     const champ = rest.replace("ban_", "");
     if (lobby.bans[s.team].includes(champ))
       return interaction.reply({ content: "❌ Your team already banned this champion.", ephemeral: true });
-    const allPicked = [...lobby.picks.A, ...lobby.picks.B];
-    if (allPicked.includes(champ))
-      return interaction.reply({ content: "❌ This champion has already been picked.", ephemeral: true });
 
     await interaction.deferUpdate().catch(() => {});
     lobby.bans[s.team].push(champ);
@@ -1421,22 +1484,32 @@ client.on("interactionCreate", async interaction => {
     if (![...lobby.teamA, ...lobby.teamB].includes(interaction.user.id))
       return interaction.reply({ content: "❌ You are not part of this match.", ephemeral: true });
 
+    // Prevent double vote processing
+    if (lobby.phase !== "vote")
+      return interaction.reply({ content: "❌ Match result is already being processed.", ephemeral: true });
+
     const side = rest === "voteA" ? "A" : "B";
     lobby.votes.A.delete(interaction.user.id);
     lobby.votes.B.delete(interaction.user.id);
     lobby.votes[side].add(interaction.user.id);
 
     const vA = lobby.votes.A.size, vB = lobby.votes.B.size;
-    await interaction.reply({
-      content: `✅ You voted **${teamLabel(lobby, side)}**. ` +
-        `(🔵 T${lobby.teamNumA}: ${vA}/3  |  🔴 T${lobby.teamNumB}: ${vB}/3)`,
-      ephemeral: true
-    });
 
     if (vA >= 3 || vB >= 3) {
+      // Set phase BEFORE async work to block any other vote from triggering finishMatch
       lobby.phase = "finished";
+      await interaction.reply({
+        content: `✅ You voted **${teamLabel(lobby, side)}**. Match is being resolved...`,
+        ephemeral: true
+      });
       finishMatch(lobby, vA >= 3 ? "A" : "B")
         .catch(err => log("ERROR", `finishMatch error L${lobby.lobbyId}:`, err));
+    } else {
+      await interaction.reply({
+        content: `✅ You voted **${teamLabel(lobby, side)}**. ` +
+          `(🔵 T${lobby.teamNumA}: ${vA}/3  |  🔴 T${lobby.teamNumB}: ${vB}/3)`,
+        ephemeral: true
+      });
     }
     return;
   }
