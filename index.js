@@ -96,10 +96,10 @@ const ADMIN_IDS     = ["341553327412346880", "279249193195929601"];
 const MAPS = ["Blackstone Arena Day", "Dragon Garden Night", "Mount Araz Night", "Meriko Night"];
 
 const DRAFT_SEQ = [
-  { type: "ban",  team: "A" }, { type: "ban",  team: "B" },
+  { type: "ban",  team: "A", global: true  }, { type: "ban",  team: "B", global: true  },
   { type: "pick", team: "A" }, { type: "pick", team: "B" },
   { type: "pick", team: "B" }, { type: "pick", team: "A" },
-  { type: "ban",  team: "B" }, { type: "ban",  team: "A" },
+  { type: "ban",  team: "B", global: false }, { type: "ban",  team: "A", global: false },
   { type: "pick", team: "A" }, { type: "pick", team: "B" },
 ];
 
@@ -198,6 +198,7 @@ function createLobby(lobbyId) {
     expected: [], teamA: [], teamB: [],
     captainA: null, captainB: null,
     draftStep: 0, available: [...CHAMPS],
+    globalBans: [],
     bans: { A: [], B: [] }, picks: { A: [], B: [] },
     votes: { A: new Set(), B: new Set() },
     cancelVotes: new Set(),
@@ -207,7 +208,7 @@ function createLobby(lobbyId) {
     activeCategory: null,
     timerInterval: null, timerTimeout: null, timerSeconds: DRAFT_TIMER,
     lobbyTimeout: null,
-    map: null, mapRerolled: false,
+    map: null,
     _boardQueue: Promise.resolve()
   };
 }
@@ -407,16 +408,28 @@ async function refreshQueue(channel, locked = false) {
 }
 
 // ─── DRAFT BOARD UI ──────────────────────────────────────────────────
+function champBanDisplay(name, isGlobal) {
+  const emoji = CHAMP_EMOJIS[name] || "";
+  const tag = isGlobal ? " *(global)*" : "";
+  return `${emoji} ~~${name}~~${tag}`;
+}
+
 function boardEmbed(lobby) {
   const s = stepOf(lobby);
   if (!s) return new EmbedBuilder().setTitle("Draft complete").setColor(0x57F287);
   const isBan = s.type === "ban";
+  const isGlobalBan = isBan && s.global;
   const sec = lobby.timerSeconds;
   const cap = captainOf(lobby);
 
-  const action = isBan
-    ? `🚫 **${teamLabel(lobby, s.team)} must BAN** — Captain <@${cap}>`
-    : `🎯 **${teamLabel(lobby, s.team)} must PICK** — Captain <@${cap}>`;
+  let action;
+  if (isGlobalBan) {
+    action = `🌍 **${teamLabel(lobby, s.team)} must GLOBAL BAN** — Captain <@${cap}>\n*This ban removes the champion for BOTH teams.*`;
+  } else if (isBan) {
+    action = `🚫 **${teamLabel(lobby, s.team)} must BAN** — Captain <@${cap}>`;
+  } else {
+    action = `🎯 **${teamLabel(lobby, s.team)} must PICK** — Captain <@${cap}>`;
+  }
 
   const teamALines = lobby.teamA.map((id, i) => {
     const crown = id === lobby.captainA ? "👑 " : "";
@@ -430,20 +443,42 @@ function boardEmbed(lobby) {
     return `${crown}<@${id}>\n${pick}`;
   }).join("\n\n");
 
-  const bansA = lobby.bans.A.length > 0 ? lobby.bans.A.map(c => champDisplay(c)).join(", ") : "—";
-  const bansB = lobby.bans.B.length > 0 ? lobby.bans.B.map(c => champDisplay(c)).join(", ") : "—";
+  // Global bans
+  const globalBansStr = lobby.globalBans.length > 0
+    ? lobby.globalBans.map(c => champBanDisplay(c, true)).join(", ")
+    : "—";
 
-  return new EmbedBuilder()
-    .setTitle(isBan ? `🚫  LOBBY #${lobby.lobbyId} — Ban Phase` : `🎯  LOBBY #${lobby.lobbyId} — Pick Phase`)
-    .setColor(isBan ? 0xED4245 : 0x5865F2)
-    .setDescription(`${action}\n\n${timerBar(sec)}\n${progressBar(lobby)}`)
+  // Regular bans per team
+  const regBansA = lobby.bans.A.length > 0 ? lobby.bans.A.map(c => champBanDisplay(c, false)).join(", ") : "—";
+  const regBansB = lobby.bans.B.length > 0 ? lobby.bans.B.map(c => champBanDisplay(c, false)).join(", ") : "—";
+
+  const embed = new EmbedBuilder()
+    .setTitle(isGlobalBan
+      ? `🌍  LOBBY #${lobby.lobbyId} — Global Ban Phase`
+      : isBan
+        ? `🚫  LOBBY #${lobby.lobbyId} — Ban Phase`
+        : `🎯  LOBBY #${lobby.lobbyId} — Pick Phase`)
+    .setColor(isGlobalBan ? 0xE67E22 : isBan ? 0xED4245 : 0x5865F2)
+    .setDescription(
+      `🗺️ **Map: ${lobby.map}**\n\n` +
+      `${action}\n\n${timerBar(sec)}\n${progressBar(lobby)}`
+    )
     .addFields(
       { name: `🔵 TEAM ${lobby.teamNumA}`, value: teamALines || "\u200b", inline: true },
       { name: "⚔️", value: "\u200b", inline: true },
       { name: `🔴 TEAM ${lobby.teamNumB}`, value: teamBLines || "\u200b", inline: true }
     )
-    .addFields({ name: "\u200b", value: `🚫 **Bans T${lobby.teamNumA}:** ${bansA}  ┃  **Bans T${lobby.teamNumB}:** ${bansB}` })
+    .addFields({
+      name: "🌍 Global Bans",
+      value: globalBansStr
+    })
+    .addFields({
+      name: "\u200b",
+      value: `🚫 **Bans T${lobby.teamNumA}:** ${regBansA}  ┃  **Bans T${lobby.teamNumB}:** ${regBansB}`
+    })
     .setFooter({ text: "75s per step • auto random on timeout • Only captains can act • !captain to claim" });
+
+  return embed;
 }
 
 // ─── DRAFT BUTTONS ───────────────────────────────────────────────────
@@ -472,6 +507,7 @@ function champBtnsForCat(lobby, catKey) {
   const s = stepOf(lobby);
   if (!s) return [];
   const isBan = s.type === "ban";
+  const isGlobalBan = isBan && s.global;
   const L = `L${lobby.lobbyId}_`;
   const prefix = isBan ? L + "ban_" : L + "pick_";
   const style = isBan ? ButtonStyle.Danger : ButtonStyle.Success;
@@ -483,8 +519,12 @@ function champBtnsForCat(lobby, catKey) {
 
   let available;
   if (isBan) {
-    available = (CHAMP_CATEGORIES[fullKey] || []).filter(c => !myBans.includes(c));
+    // Ban phase: hide globalBans + own regular bans
+    available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
+      !lobby.globalBans.includes(c) && !myBans.includes(c)
+    );
   } else {
+    // Pick phase: hide globalBans (via lobby.available) + opponent regular bans + own picks
     available = (CHAMP_CATEGORIES[fullKey] || []).filter(c =>
       !oppBans.includes(c) && !myPicks.includes(c) && lobby.available.includes(c)
     );
@@ -548,14 +588,26 @@ async function startDraftStep(lobby) {
     const opponent = s.team === "A" ? "B" : "A";
 
     if (s.type === "ban") {
-      const pool = CHAMPS.filter(c => !lobby.bans[s.team].includes(c));
-      const champ = pool[Math.floor(Math.random() * pool.length)];
-      lobby.bans[s.team].push(champ);
-      if (lobby.bans[opponent].includes(champ)) {
+      if (s.global) {
+        // Global ban: remove from both teams
+        const pool = CHAMPS.filter(c => !lobby.globalBans.includes(c));
+        const champ = pool[Math.floor(Math.random() * pool.length)];
+        lobby.globalBans.push(champ);
         lobby.available = lobby.available.filter(c => c !== champ);
-        log("INFO", `Auto-ban L${lobby.lobbyId}: ${champ} ${teamLabel(lobby, s.team)} — double ban`);
-      } else { log("INFO", `Auto-ban L${lobby.lobbyId}: ${champ} ${teamLabel(lobby, s.team)}`); }
-      await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(champ)} was automatically **banned** for ${teamLabel(lobby, s.team)} (<@${cap}>).`).catch(() => {});
+        log("INFO", `Auto-global-ban L${lobby.lobbyId}: ${champ} ${teamLabel(lobby, s.team)}`);
+        await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(champ)} was automatically **GLOBAL BANNED** by ${teamLabel(lobby, s.team)} (<@${cap}>). Removed for both teams.`).catch(() => {});
+      } else {
+        // Regular ban: only for enemy team
+        const pool = CHAMPS.filter(c => !lobby.bans[s.team].includes(c) && !lobby.globalBans.includes(c));
+        const champ = pool[Math.floor(Math.random() * pool.length)];
+        lobby.bans[s.team].push(champ);
+        const opponent = s.team === "A" ? "B" : "A";
+        if (lobby.bans[opponent].includes(champ)) {
+          lobby.available = lobby.available.filter(c => c !== champ);
+        }
+        log("INFO", `Auto-ban L${lobby.lobbyId}: ${champ} ${teamLabel(lobby, s.team)}`);
+        await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(champ)} was automatically **banned** for ${teamLabel(lobby, s.team)} (<@${cap}>).`).catch(() => {});
+      }
     } else {
       const oppBans = s.team === "A" ? lobby.bans.B : lobby.bans.A;
       const myPicks = lobby.picks[s.team];
@@ -582,17 +634,23 @@ function advanceDraft(lobby) {
 // ─── FINISH DRAFT + MAP ──────────────────────────────────────────────
 async function finishDraft(lobby) {
   stopTimer(lobby);
-  lobby.map = MAPS[Math.floor(Math.random() * MAPS.length)];
-  lobby.mapRerolled = false;
+
+  // Global bans display
+  const globalBansStr = lobby.globalBans.length > 0
+    ? lobby.globalBans.map(c => champBanDisplay(c, true)).join(", ")
+    : "—";
+  const regBansA = lobby.bans.A.length > 0 ? lobby.bans.A.map(c => champBanDisplay(c, false)).join(", ") : "—";
+  const regBansB = lobby.bans.B.length > 0 ? lobby.bans.B.map(c => champBanDisplay(c, false)).join(", ") : "—";
 
   const finalEmbed = new EmbedBuilder()
     .setTitle(`✅  LOBBY #${lobby.lobbyId} — Draft Complete!`)
     .setColor(0x57F287)
     .setDescription(
       `**▬▬▬▬▬▬ FINAL RECAP ▬▬▬▬▬▬**\n\n` +
-      `🚫 **Bans T${lobby.teamNumA}:** ${lobby.bans.A.map(c => champDisplay(c)).join(", ") || "—"}\n` +
-      `🚫 **Bans T${lobby.teamNumB}:** ${lobby.bans.B.map(c => champDisplay(c)).join(", ") || "—"}\n\n` +
-      `🗺️ **Map:** ${lobby.map}`
+      `🗺️ **Map: ${lobby.map}**\n\n` +
+      `🌍 **Global Bans:** ${globalBansStr}\n` +
+      `🚫 **Bans T${lobby.teamNumA}:** ${regBansA}\n` +
+      `🚫 **Bans T${lobby.teamNumB}:** ${regBansB}`
     )
     .addFields(
       { name: `🔵 TEAM ${lobby.teamNumA}`, value: lobby.teamA.map((id, i) => `<@${id}>\n${champDisplay(lobby.picks.A[i] ?? "?")}`).join("\n\n"), inline: true },
@@ -605,8 +663,7 @@ async function finishDraft(lobby) {
   const L = `L${lobby.lobbyId}_`;
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(L + "voteA").setLabel(`🔵  Team ${lobby.teamNumA} Won`).setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(L + "voteB").setLabel(`🔴  Team ${lobby.teamNumB} Won`).setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(L + "reroll_map").setLabel("🔄 Reroll Map").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(L + "voteB").setLabel(`🔴  Team ${lobby.teamNumB} Won`).setStyle(ButtonStyle.Danger)
   );
   const rows = [row1, cancelBtnRow(lobby)];
 
@@ -749,10 +806,12 @@ async function startMatch(lobby) {
 
   if (lobby.lobbyVoice) { await lobby.lobbyVoice.delete().catch(err => log("WARN", "Lobby voice delete:", err)); lobby.lobbyVoice = null; }
   lobby.phase = "draft";
+  lobby.map = MAPS[Math.floor(Math.random() * MAPS.length)];
 
   lobby.announceMsg = await lobby.channel.send({ embeds: [
     new EmbedBuilder().setTitle(`⚔️  Lobby #${lobby.lobbyId} — Match Starting!`).setColor(0xFEE75C)
       .setDescription(
+        `🗺️ **Map: ${lobby.map}**\n\n` +
         `**🔵 Team ${lobby.teamNumA}** — Captain <@${lobby.captainA}>\n` + A.map(id => `<@${id}>`).join("  ·  ") +
         `\n\n**🔴 Team ${lobby.teamNumB}** — Captain <@${lobby.captainB}>\n` + B.map(id => `<@${id}>`).join("  ·  ") +
         `\n\n*Draft is live in <#${lobby.draftChannel.id}>!*`
@@ -808,6 +867,7 @@ async function finishMatch(lobby, winner) {
     teamA: [...lobby.teamA], teamB: [...lobby.teamB],
     picksA: [...lobby.picks.A], picksB: [...lobby.picks.B],
     bansA: [...lobby.bans.A], bansB: [...lobby.bans.B],
+    globalBans: [...lobby.globalBans],
     winner, changes: { ...changes }, map: lobby.map
   });
   await saveHistory();
@@ -835,8 +895,9 @@ async function finishMatch(lobby, winner) {
       .setColor(winner === "A" ? 0x3498DB : 0xE74C3C)
       .setDescription(
         `🗺️ **Map:** ${lobby.map}\n\n` +
-        `**🚫 Bans T${lobby.teamNumA}:** ${lobby.bans.A.map(c => champDisplay(c)).join(", ") || "—"}\n` +
-        `**🚫 Bans T${lobby.teamNumB}:** ${lobby.bans.B.map(c => champDisplay(c)).join(", ") || "—"}\n\n` +
+        `**🌍 Global Bans:** ${lobby.globalBans.length > 0 ? lobby.globalBans.map(c => champBanDisplay(c, true)).join(", ") : "—"}\n` +
+        `**🚫 Bans T${lobby.teamNumA}:** ${lobby.bans.A.length > 0 ? lobby.bans.A.map(c => champBanDisplay(c, false)).join(", ") : "—"}\n` +
+        `**🚫 Bans T${lobby.teamNumB}:** ${lobby.bans.B.length > 0 ? lobby.bans.B.map(c => champBanDisplay(c, false)).join(", ") : "—"}\n\n` +
         `**🔵 Team ${lobby.teamNumA}** — Captain <@${lobby.captainA}>\n` +
         lobby.teamA.map((id, i) => `<@${id}> ${champDisplay(lobby.picks.A[i] ?? "?")}  **${changes[id] >= 0 ? "+" : ""}${changes[id]}**  \`${stats[id].elo} ELO\``).join("\n") +
         `\n\n**🔴 Team ${lobby.teamNumB}** — Captain <@${lobby.captainB}>\n` +
@@ -1281,46 +1342,6 @@ client.on("interactionCreate", async interaction => {
   if (!lobby) return interaction.reply({ content: "❌ This lobby no longer exists.", ephemeral: true });
   const rest = cid.substring(3);
 
-  // ── Reroll map ──
-  if (rest === "reroll_map") {
-    if (![...lobby.teamA, ...lobby.teamB].includes(interaction.user.id))
-      return interaction.reply({ content: "❌ You are not part of this match.", ephemeral: true });
-    if (lobby.mapRerolled) return interaction.reply({ content: "❌ Map has already been rerolled.", ephemeral: true });
-    lobby.mapRerolled = true;
-    const oldMap = lobby.map;
-    const otherMaps = MAPS.filter(m => m !== oldMap);
-    lobby.map = otherMaps[Math.floor(Math.random() * otherMaps.length)];
-    await interaction.deferUpdate().catch(() => {});
-
-    // Rebuild the embed with new map and disabled reroll
-    const L = `L${lobby.lobbyId}_`;
-    const finalEmbed = new EmbedBuilder()
-      .setTitle(`✅  LOBBY #${lobby.lobbyId} — Draft Complete!`)
-      .setColor(0x57F287)
-      .setDescription(
-        `**▬▬▬▬▬▬ FINAL RECAP ▬▬▬▬▬▬**\n\n` +
-        `🚫 **Bans T${lobby.teamNumA}:** ${lobby.bans.A.map(c => champDisplay(c)).join(", ") || "—"}\n` +
-        `🚫 **Bans T${lobby.teamNumB}:** ${lobby.bans.B.map(c => champDisplay(c)).join(", ") || "—"}\n\n` +
-        `🗺️ **Map:** ${lobby.map} *(rerolled)*`
-      )
-      .addFields(
-        { name: `🔵 TEAM ${lobby.teamNumA}`, value: lobby.teamA.map((id, i) => `<@${id}>\n${champDisplay(lobby.picks.A[i] ?? "?")}`).join("\n\n"), inline: true },
-        { name: "\u200b", value: "\u200b", inline: true },
-        { name: `🔴 TEAM ${lobby.teamNumB}`, value: lobby.teamB.map((id, i) => `<@${id}>\n${champDisplay(lobby.picks.B[i] ?? "?")}`).join("\n\n"), inline: true }
-      )
-      .addFields({ name: "\u200b", value: "*3 votes needed to confirm the result.*" })
-      .setFooter({ text: "Vote below to confirm the winner." });
-
-    const row1 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(L + "voteA").setLabel(`🔵  Team ${lobby.teamNumA} Won`).setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(L + "voteB").setLabel(`🔴  Team ${lobby.teamNumB} Won`).setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(L + "reroll_map").setLabel("🔄 Rerolled").setStyle(ButtonStyle.Secondary).setDisabled(true)
-    );
-    await lobby.boardMsg.edit({ embeds: [finalEmbed], components: [row1, cancelBtnRow(lobby)] }).catch(() => {});
-    await lobby.draftChannel.send(`🗺️ Map rerolled by <@${interaction.user.id}>: **${oldMap}** → **${lobby.map}**`).catch(() => {});
-    return;
-  }
-
   // ── Cancel match vote ──
   if (rest === "cancel_match") {
     const allPlayers = [...lobby.teamA, ...lobby.teamB];
@@ -1335,8 +1356,7 @@ client.on("interactionCreate", async interaction => {
         const L = `L${lobby.lobbyId}_`;
         const row1 = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(L + "voteA").setLabel(`🔵  Team ${lobby.teamNumA} Won`).setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(L + "voteB").setLabel(`🔴  Team ${lobby.teamNumB} Won`).setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId(L + "reroll_map").setLabel(lobby.mapRerolled ? "🔄 Rerolled" : "🔄 Reroll Map").setStyle(ButtonStyle.Secondary).setDisabled(lobby.mapRerolled)
+          new ButtonBuilder().setCustomId(L + "voteB").setLabel(`🔴  Team ${lobby.teamNumB} Won`).setStyle(ButtonStyle.Danger)
         );
         await lobby.boardMsg.edit({ components: [row1, cancelBtnRow(lobby)] }).catch(() => {});
       }
@@ -1365,14 +1385,25 @@ client.on("interactionCreate", async interaction => {
     if (interaction.user.id !== capId) return interaction.reply({ content: `❌ Only the ${teamLabel(lobby, s.team)} captain can ban.`, ephemeral: true });
     if (s.type !== "ban") return interaction.reply({ content: "❌ It's pick phase, not ban phase.", ephemeral: true });
     const champ = rest.replace("ban_", "");
+    if (lobby.globalBans.includes(champ)) return interaction.reply({ content: "❌ Already globally banned.", ephemeral: true });
     if (lobby.bans[s.team].includes(champ)) return interaction.reply({ content: "❌ Already banned by your team.", ephemeral: true });
     const expectedStep = lobby.draftStep;
-    stopTimer(lobby); // Stop timer immediately to prevent double action
+    stopTimer(lobby);
     await interaction.deferUpdate().catch(() => {});
-    if (lobby.draftStep !== expectedStep) return; // Step already advanced
-    lobby.bans[s.team].push(champ);
-    const opponent = s.team === "A" ? "B" : "A";
-    if (lobby.bans[opponent].includes(champ)) { lobby.available = lobby.available.filter(c => c !== champ); }
+    if (lobby.draftStep !== expectedStep) return;
+
+    if (s.global) {
+      // Global ban: remove for BOTH teams
+      lobby.globalBans.push(champ);
+      lobby.available = lobby.available.filter(c => c !== champ);
+      log("INFO", `L${lobby.lobbyId}: ${teamLabel(lobby, s.team)} GLOBAL banned ${champ}`);
+    } else {
+      // Regular ban: only for enemy team
+      lobby.bans[s.team].push(champ);
+      const opponent = s.team === "A" ? "B" : "A";
+      if (lobby.bans[opponent].includes(champ)) { lobby.available = lobby.available.filter(c => c !== champ); }
+      log("INFO", `L${lobby.lobbyId}: ${teamLabel(lobby, s.team)} banned ${champ}`);
+    }
     advanceDraft(lobby);
     return;
   }
