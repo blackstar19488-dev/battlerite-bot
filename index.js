@@ -542,6 +542,7 @@ async function startDraftStep(lobby) {
   lobby.timerTimeout = setTimeout(async () => {
     stopTimer(lobby);
     if (!lobby.active || lobby.phase !== "draft") return;
+    const expectedStep = lobby.draftStep;
     const s = stepOf(lobby); if (!s) return;
     const cap = captainOf(lobby);
     const opponent = s.team === "A" ? "B" : "A";
@@ -564,7 +565,8 @@ async function startDraftStep(lobby) {
       log("INFO", `Auto-pick L${lobby.lobbyId}: ${champ} ${teamLabel(lobby, s.team)}`);
       await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(champ)} was automatically **picked** for ${teamLabel(lobby, s.team)} (<@${cap}>).`).catch(() => {});
     }
-    advanceDraft(lobby);
+    // Only advance if step hasn't been advanced by a button click
+    if (lobby.draftStep === expectedStep) advanceDraft(lobby);
   }, DRAFT_TIMER * 1000);
 }
 
@@ -647,7 +649,12 @@ async function startLobby(channel, lobbyId) {
     const inVoice = lobby.lobbyVoice ? [...lobby.lobbyVoice.members.values()].map(m => m.id) : [];
     const missing = lobby.expected.filter(id => !inVoice.includes(id));
     const present = lobby.expected.filter(id => inVoice.includes(id));
-    for (const id of present) { if (!queue.includes(id)) { queue.push(id); await addRole(channel.guild, id, inQueueRole); } }
+    // Re-queue present players at the FRONT (they queued before current queue players)
+    const toRequeue = present.filter(id => !queue.includes(id));
+    if (toRequeue.length > 0) {
+      queue = [...toRequeue, ...queue];
+      for (const id of toRequeue) await addRole(channel.guild, id, inQueueRole);
+    }
     for (const id of missing) await removeRole(channel.guild, id, inQueueRole);
     await channel.send(
       `⌛ **Lobby #${lobbyId}** expired after **${LOBBY_TIMEOUT}s**.\nMissing: ${missing.map(id => `<@${id}>`).join(", ")}\n${present.length > 0 ? `${present.map(id => `<@${id}>`).join(", ")} have been re-added to the queue.` : ""}`
@@ -1359,7 +1366,10 @@ client.on("interactionCreate", async interaction => {
     if (s.type !== "ban") return interaction.reply({ content: "❌ It's pick phase, not ban phase.", ephemeral: true });
     const champ = rest.replace("ban_", "");
     if (lobby.bans[s.team].includes(champ)) return interaction.reply({ content: "❌ Already banned by your team.", ephemeral: true });
+    const expectedStep = lobby.draftStep;
+    stopTimer(lobby); // Stop timer immediately to prevent double action
     await interaction.deferUpdate().catch(() => {});
+    if (lobby.draftStep !== expectedStep) return; // Step already advanced
     lobby.bans[s.team].push(champ);
     const opponent = s.team === "A" ? "B" : "A";
     if (lobby.bans[opponent].includes(champ)) { lobby.available = lobby.available.filter(c => c !== champ); }
@@ -1379,7 +1389,10 @@ client.on("interactionCreate", async interaction => {
     if (oppBans.includes(champ) && !lobby.bans[s.team].includes(champ)) return interaction.reply({ content: "❌ Banned for your team.", ephemeral: true });
     if (!lobby.available.includes(champ)) return interaction.reply({ content: "❌ Unavailable (double-banned).", ephemeral: true });
     if (myPicks.includes(champ)) return interaction.reply({ content: "❌ Already picked by your team.", ephemeral: true });
+    const expectedStep = lobby.draftStep;
+    stopTimer(lobby); // Stop timer immediately to prevent double action
     await interaction.deferUpdate().catch(() => {});
+    if (lobby.draftStep !== expectedStep) return; // Step already advanced
     lobby.picks[s.team].push(champ);
     advanceDraft(lobby);
     return;
