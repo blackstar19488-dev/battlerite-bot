@@ -764,13 +764,20 @@ async function startMatch(lobby) {
     ]
   });
 
-  // Private team chat channels
+  // Private team chat channels — fetch valid admin members first, exclude if already a player
+  const validAdmins = [];
+  for (const id of ADMIN_IDS) {
+    if ([...A, ...B].includes(id)) continue; // Admin is a player, already has permissions
+    const m = await guild.members.fetch(id).catch(() => null);
+    if (m) validAdmins.push(id);
+  }
+
   lobby.chatA = await guild.channels.create({
     name: `💬-team-${lobby.teamNumA}-chat`, type: ChannelType.GuildText, parent: lobby.category.id,
     permissionOverwrites: [
       { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
       ...A.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
-      ...ADMIN_IDS.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
+      ...validAdmins.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
       { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
     ]
   });
@@ -779,7 +786,7 @@ async function startMatch(lobby) {
     permissionOverwrites: [
       { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
       ...B.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
-      ...ADMIN_IDS.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
+      ...validAdmins.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
       { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
     ]
   });
