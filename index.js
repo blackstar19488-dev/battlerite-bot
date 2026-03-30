@@ -89,7 +89,7 @@ const CHAMP_CATEGORIES = {
 const CHAMPS        = Object.values(CHAMP_CATEGORIES).flat();
 const DRAFT_TIMER   = 75;
 const LOBBY_TIMEOUT = 200;
-const MAX_LOBBIES   = 2;
+const MAX_LOBBIES   = 3;
 const CANCEL_VOTES  = 4;
 const ADMIN_IDS     = ["341553327412346880", "279249193195929601"];
 
@@ -215,9 +215,10 @@ function createLobby(lobbyId) {
 function getFreeLobbySlot() {
   if (!lobbies.has(1)) return 1;
   if (!lobbies.has(2)) return 2;
+  if (!lobbies.has(3)) return 3;
   return null;
 }
-function bothLobbiesActive() { return lobbies.has(1) && lobbies.has(2); }
+function allLobbiesActive() { return lobbies.has(1) && lobbies.has(2) && lobbies.has(3); }
 
 function findLobbyByDraftChannel(channelId) {
   for (const [, lobby] of lobbies) {
@@ -365,17 +366,15 @@ async function updateLadder() {
 
 // ─── QUEUE UI ────────────────────────────────────────────────────────
 function nextLobbyLabel() {
-  if (!lobbies.has(1) && !lobbies.has(2)) return "Lobby #1";
-  if (lobbies.has(1) && !lobbies.has(2))  return "Lobby #2";
-  if (!lobbies.has(1) && lobbies.has(2))  return "Lobby #1";
-  return null;
+  const slot = getFreeLobbySlot();
+  return slot ? `Lobby #${slot}` : null;
 }
 
 function queueEmbed() {
   const next = nextLobbyLabel();
   const title = next ? `⚔️ Battlerite 3v3 — Queue (${next})` : "⚔️ Battlerite 3v3 — Queue";
   let desc;
-  if (!next) desc = "*⏳ Both lobbies are in progress. Please wait for one to finish.*";
+  if (!next) desc = "*⏳ All lobbies are in progress. Please wait for one to finish.*";
   else if (queue.length === 0) desc = "*Queue is empty — click **Join** to enter!*";
   else desc = queue.map((id, i) => `**${i + 1}.** <@${id}> — \`${stats[id]?.elo ?? 1000} ELO\``).join("\n");
   return new EmbedBuilder().setTitle(title).setColor(0x5865F2).setDescription(desc)
@@ -383,7 +382,7 @@ function queueEmbed() {
 }
 
 function queueBtns(disabled = false) {
-  const blocked = bothLobbiesActive();
+  const blocked = allLobbiesActive();
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("q_join").setLabel("✅  Join").setStyle(ButtonStyle.Success).setDisabled(disabled || blocked),
     new ButtonBuilder().setCustomId("q_leave").setLabel("❌  Leave").setStyle(ButtonStyle.Danger).setDisabled(disabled)
@@ -893,7 +892,7 @@ client.on("messageCreate", async msg => {
       const userId = msg.author.id;
       const queueChannel = msg.guild.channels.cache.find(c => c.name === "queue-lobby-elo" && c.isTextBased());
       const isQueueChannel = queueChannel && msg.channel.id === queueChannel.id;
-      if (!bothLobbiesActive() && !queue.includes(userId) && !findLobbyByPlayer(userId) && !findLobbyByExpected(userId) && queue.length < 6) {
+      if (!allLobbiesActive() && !queue.includes(userId) && !findLobbyByPlayer(userId) && !findLobbyByExpected(userId) && queue.length < 6) {
         ensurePlayer(userId); queue.push(userId); await addRole(msg.guild, userId, inQueueRole);
       }
       if (isQueueChannel) await refreshQueue(msg.channel, false);
@@ -969,8 +968,8 @@ client.on("messageCreate", async msg => {
           "`!clearqueue` — Clear the entire queue\n" +
           "`!clearqueue @player` — Silently remove a player from queue\n" +
           "`!resetlobby` — Reset all lobbies\n" +
-          "`!resetlobby 1/2` — Reset a specific lobby\n" +
-          "`!cancel 1/2` — Cancel a specific lobby"
+          "`!resetlobby 1/2/3` — Reset a specific lobby\n" +
+          "`!cancel 1/2/3` — Cancel a specific lobby"
         )
     ] });
     return;
@@ -1175,7 +1174,7 @@ client.on("messageCreate", async msg => {
     if (!ADMIN_IDS.includes(msg.author.id)) return msg.reply("❌ You don't have permission.");
     const args = msg.content.trim().split(/\s+/);
     const num = parseInt(args[1]);
-    if (num === 1 || num === 2) {
+    if (num >= 1 && num <= 3) {
       const lobby = lobbies.get(num);
       if (!lobby) return msg.reply(`❌ Lobby #${num} is not active.`);
       await cancelMatch(lobby);
@@ -1212,7 +1211,7 @@ client.on("messageCreate", async msg => {
     if (!hasPerms) return msg.reply("❌ You don't have permission.");
     const args = msg.content.trim().split(/\s+/);
     const num = parseInt(args[1]);
-    if (num === 1 || num === 2) {
+    if (num >= 1 && num <= 3) {
       const lobby = lobbies.get(num);
       if (!lobby) return msg.reply(`❌ Lobby #${num} is not active.`);
       await msg.channel.send(`⚠️ Lobby #${num} cancelled by a moderator.`);
@@ -1222,7 +1221,7 @@ client.on("messageCreate", async msg => {
     const lobby = findLobbyByDraftChannel(msg.channel.id);
     if (lobby) { await msg.channel.send(`⚠️ Lobby #${lobby.lobbyId} cancelled.`); await cancelMatch(lobby); return; }
     if (lobbies.size === 0) return msg.reply("No active lobbies to cancel.");
-    return msg.reply(`❌ Please specify: \`!cancel 1\` or \`!cancel 2\`\nActive: **#${[...lobbies.keys()].join(", ")}**`);
+    return msg.reply(`❌ Please specify: \`!cancel 1\`, \`!cancel 2\`, or \`!cancel 3\`\nActive: **#${[...lobbies.keys()].join(", ")}**`);
   }
 
   } catch (err) { log("ERROR", "messageCreate error:", err); }
@@ -1239,7 +1238,7 @@ client.on("interactionCreate", async interaction => {
     if (_queueLock) return interaction.reply({ content: "⏳ Processing, try again.", ephemeral: true });
     _queueLock = true;
     try {
-      if (bothLobbiesActive()) { _queueLock = false; return interaction.reply({ content: "⏳ Both lobbies in progress. Please wait.", ephemeral: true }); }
+      if (allLobbiesActive()) { _queueLock = false; return interaction.reply({ content: "⏳ All lobbies are in progress. Please wait for one to finish.", ephemeral: true }); }
       await ensureRoles(interaction.guild); ensurePlayer(interaction.user.id);
       if (findLobbyByPlayer(interaction.user.id) || findLobbyByExpected(interaction.user.id)) { _queueLock = false; return interaction.reply({ content: "❌ You're already in an active match.", ephemeral: true }); }
       if (queue.includes(interaction.user.id)) { _queueLock = false; return interaction.reply({ content: "You're already in the queue.", ephemeral: true }); }
