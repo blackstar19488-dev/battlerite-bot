@@ -209,7 +209,7 @@ function createLobby(lobbyId) {
     timerInterval: null, timerTimeout: null, timerSeconds: DRAFT_TIMER,
     lobbyTimeout: null,
     map: null,
-    bets: { A: [], B: [] }, betMsg: null,
+    bets: { A: [], B: [] }, betMsg: null, betsClosed: false, betTimeout: null,
     _boardQueue: Promise.resolve()
   };
 }
@@ -683,6 +683,21 @@ async function finishDraft(lobby) {
     content: `🎮 **Draft complete!** ${[...lobby.teamA, ...lobby.teamB].map(id => `<@${id}>`).join(" ")} — Go play **${lobby.map}**!`,
     allowedMentions: { users: [...lobby.teamA, ...lobby.teamB] }
   }).catch(() => {});
+
+  // Close bets after 2 minutes
+  lobby.betTimeout = setTimeout(async () => {
+    if (lobby.betsClosed) return;
+    lobby.betsClosed = true;
+    if (lobby.betMsg) {
+      const L = `L${lobby.lobbyId}_`;
+      const closedRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(L + "betA").setLabel(`🔵 Bets closed`).setStyle(ButtonStyle.Primary).setDisabled(true),
+        new ButtonBuilder().setCustomId(L + "betB").setLabel(`🔴 Bets closed`).setStyle(ButtonStyle.Danger).setDisabled(true)
+      );
+      await lobby.betMsg.edit({ components: [closedRow] }).catch(() => {});
+    }
+    await lobby.channel.send(`🎰 **Lobby #${lobby.lobbyId}** — Bets are now closed!`).catch(() => {});
+  }, 120_000);
 }
 
 // ─── LOBBY CREATION ──────────────────────────────────────────────────
@@ -845,7 +860,7 @@ async function startMatch(lobby) {
     .setDescription(
       `🔵 **Team ${lobby.teamNumA}:** ${A.map(id => `<@${id}>`).join(", ")}\n` +
       `🔴 **Team ${lobby.teamNumB}:** ${B.map(id => `<@${id}>`).join(", ")}\n\n` +
-      `*Place your bet! +1 ELO if you're right, -1 ELO if you're wrong.\nPlayers in the match cannot bet.*`
+      `*Place your bet! +1 ELO if you're right, -1 ELO if you're wrong.\nBets close 2 minutes after draft ends. Players in the match cannot bet.*`
     );
   const betRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(L + "betA").setLabel(`🔵 Bet Team ${lobby.teamNumA}`).setStyle(ButtonStyle.Primary),
@@ -988,7 +1003,7 @@ async function cancelMatch(lobby) {
 
 // ─── CLEANUP ─────────────────────────────────────────────────────────
 async function cleanupLobby(lobby) {
-  stopTimer(lobby); clearTimeout(lobby.lobbyTimeout);
+  stopTimer(lobby); clearTimeout(lobby.lobbyTimeout); clearTimeout(lobby.betTimeout);
   if (lobby.voiceA)       await lobby.voiceA.delete().catch(() => {});
   if (lobby.voiceB)       await lobby.voiceB.delete().catch(() => {});
   if (lobby.lobbyVoice)   await lobby.lobbyVoice.delete().catch(() => {});
@@ -1315,7 +1330,7 @@ client.on("messageCreate", async msg => {
       lobby.active = false; lobby.phase = null;
       const all = [...new Set([...lobby.expected, ...lobby.teamA, ...lobby.teamB])];
       for (const id of all) { await removeRole(msg.guild, id, inGameRole); await removeRole(msg.guild, id, inQueueRole); }
-      stopTimer(lobby); clearTimeout(lobby.lobbyTimeout);
+      stopTimer(lobby); clearTimeout(lobby.lobbyTimeout); clearTimeout(lobby.betTimeout);
       if (lobby.voiceA) await lobby.voiceA.delete().catch(() => {});
       if (lobby.voiceB) await lobby.voiceB.delete().catch(() => {});
       if (lobby.lobbyVoice) await lobby.lobbyVoice.delete().catch(() => {});
@@ -1409,6 +1424,9 @@ client.on("interactionCreate", async interaction => {
     // Players in the match cannot bet
     if ([...lobby.teamA, ...lobby.teamB].includes(userId))
       return interaction.reply({ content: "❌ You can't bet on your own match.", ephemeral: true });
+    // Bets closed after 2 minutes
+    if (lobby.betsClosed)
+      return interaction.reply({ content: "❌ Bets are closed for this match.", ephemeral: true });
     // Already bet?
     if (lobby.bets.A.includes(userId) || lobby.bets.B.includes(userId))
       return interaction.reply({ content: "❌ You already placed a bet on this match.", ephemeral: true });
