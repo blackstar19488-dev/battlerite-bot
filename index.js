@@ -209,6 +209,7 @@ function createLobby(lobbyId) {
     timerInterval: null, timerTimeout: null, timerSeconds: DRAFT_TIMER,
     lobbyTimeout: null,
     map: null,
+    bets: { A: [], B: [] }, betMsg: null,
     _boardQueue: Promise.resolve()
   };
 }
@@ -311,6 +312,7 @@ function pickCaptain(team) {
 // ─── LADDER EMBED (TOP 20) ──────────────────────────────────────────
 function ladderEmbed() {
   const players = Object.entries(stats)
+    .filter(([, s]) => s.games > 0)
     .sort(([, a], [, b]) => b.elo - a.elo)
     .slice(0, 20);
 
@@ -675,6 +677,12 @@ async function finishDraft(lobby) {
     lobby.boardMsg = await lobby.draftChannel.send({ embeds: [finalEmbed], components: rows }).catch(() => null);
   }
   lobby.phase = "vote";
+
+  // Ping all 6 players to log on and play
+  await lobby.draftChannel.send({
+    content: `🎮 **Draft complete!** ${[...lobby.teamA, ...lobby.teamB].map(id => `<@${id}>`).join(" ")} — Go play **${lobby.map}**!`,
+    allowedMentions: { users: [...lobby.teamA, ...lobby.teamB] }
+  }).catch(() => {});
 }
 
 // ─── LOBBY CREATION ──────────────────────────────────────────────────
@@ -829,6 +837,22 @@ async function startMatch(lobby) {
   await lobby.chatA.send(`🔵 **Team ${lobby.teamNumA} — Private Chat**\nDiscuss your ban/pick strategy here. Only your team and admins can see this channel.`).catch(() => {});
   await lobby.chatB.send(`🔴 **Team ${lobby.teamNumB} — Private Chat**\nDiscuss your ban/pick strategy here. Only your team and admins can see this channel.`).catch(() => {});
 
+  // Bet message in queue channel
+  const L = `L${lobby.lobbyId}_`;
+  const betEmbed = new EmbedBuilder()
+    .setTitle(`🎰  Lobby #${lobby.lobbyId} — Bets are open!`)
+    .setColor(0xF1C40F)
+    .setDescription(
+      `🔵 **Team ${lobby.teamNumA}:** ${A.map(id => `<@${id}>`).join(", ")}\n` +
+      `🔴 **Team ${lobby.teamNumB}:** ${B.map(id => `<@${id}>`).join(", ")}\n\n` +
+      `*Place your bet! +1 ELO if you're right, -1 ELO if you're wrong.\nPlayers in the match cannot bet.*`
+    );
+  const betRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(L + "betA").setLabel(`🔵 Bet Team ${lobby.teamNumA}`).setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(L + "betB").setLabel(`🔴 Bet Team ${lobby.teamNumB}`).setStyle(ButtonStyle.Danger)
+  );
+  lobby.betMsg = await lobby.channel.send({ embeds: [betEmbed], components: [betRow] }).catch(() => null);
+
   await startDraftStep(lobby);
 }
 
@@ -864,6 +888,24 @@ async function finishMatch(lobby, winner) {
     stats[id].currentStreak = 0;
   });
 
+  // Resolve bets
+  const betWinners = lobby.bets[winner];
+  const betLosers = lobby.bets[winner === "A" ? "B" : "A"];
+  const betChanges = {};
+
+  for (const id of betWinners) {
+    ensurePlayer(id);
+    stats[id].elo = Math.min(9999, stats[id].elo + 1);
+    stats[id].mmr = Math.min(9999, stats[id].mmr + 1);
+    betChanges[id] = +1;
+  }
+  for (const id of betLosers) {
+    ensurePlayer(id);
+    stats[id].elo = Math.max(100, stats[id].elo - 1);
+    stats[id].mmr = Math.max(100, stats[id].mmr - 1);
+    betChanges[id] = -1;
+  }
+
   season.matchCount++;
   await saveStatsNow();
   await saveSeason();
@@ -879,18 +921,28 @@ async function finishMatch(lobby, winner) {
   });
   await saveHistory();
 
+  // Build bet results text
+  let betText = "";
+  if (betWinners.length > 0 || betLosers.length > 0) {
+    betText = "\n\n**🎰 Bets**\n";
+    if (betWinners.length > 0) betText += betWinners.map(id => `<@${id}> **+1** ✅`).join("\n") + "\n";
+    if (betLosers.length > 0) betText += betLosers.map(id => `<@${id}> **-1** ❌`).join("\n");
+  }
+
   const resultEmbed = new EmbedBuilder()
     .setTitle(`🏆  ${winLabel} Wins! — Lobby #${lobby.lobbyId}`)
     .setColor(winner === "A" ? 0x3498DB : 0xE74C3C)
     .setDescription(
       `🗺️ **Map:** ${lobby.map}\n\n` +
       "**🥇 Winners**\n" + winners.map(id => `<@${id}>  **${changes[id] >= 0 ? "+" : ""}${changes[id]}**  \`${stats[id].elo} ELO\``).join("\n") +
-      "\n\n**💀 Losers**\n" + losers.map(id => `<@${id}>  **${changes[id] >= 0 ? "+" : ""}${changes[id]}**  \`${stats[id].elo} ELO\``).join("\n")
+      "\n\n**💀 Losers**\n" + losers.map(id => `<@${id}>  **${changes[id] >= 0 ? "+" : ""}${changes[id]}**  \`${stats[id].elo} ELO\``).join("\n") +
+      betText
     ).setTimestamp();
 
   if (lobby.boardMsg) await lobby.boardMsg.delete().catch(() => {});
   if (lobby.lobbyPingMsg) await lobby.lobbyPingMsg.delete().catch(() => {});
   if (lobby.announceMsg) await lobby.announceMsg.delete().catch(() => {});
+  if (lobby.betMsg) await lobby.betMsg.delete().catch(() => {});
   await lobby.channel.send({ embeds: [resultEmbed] });
 
   // History channel
@@ -929,6 +981,7 @@ async function cancelMatch(lobby) {
   if (lobby.boardMsg) await lobby.boardMsg.delete().catch(() => {});
   if (lobby.lobbyPingMsg) await lobby.lobbyPingMsg.delete().catch(() => {});
   if (lobby.announceMsg) await lobby.announceMsg.delete().catch(() => {});
+  if (lobby.betMsg) await lobby.betMsg.delete().catch(() => {});
   await lobby.channel.send(`⚠️ **Lobby #${lobby.lobbyId}** has been cancelled. No ELO changes.`).catch(() => {});
   await cleanupLobby(lobby);
 }
@@ -1273,6 +1326,7 @@ client.on("messageCreate", async msg => {
       if (lobby.boardMsg) await lobby.boardMsg.delete().catch(() => {});
       if (lobby.lobbyPingMsg) await lobby.lobbyPingMsg.delete().catch(() => {});
       if (lobby.announceMsg) await lobby.announceMsg.delete().catch(() => {});
+      if (lobby.betMsg) await lobby.betMsg.delete().catch(() => {});
     }
     lobbies.clear(); queue = [];
     await refreshQueue(msg.channel, false).catch(() => {});
@@ -1348,6 +1402,28 @@ client.on("interactionCreate", async interaction => {
   const lobby = lobbies.get(lobbyId);
   if (!lobby) return interaction.reply({ content: "❌ This lobby no longer exists.", ephemeral: true });
   const rest = cid.substring(3);
+
+  // ── Bet ──
+  if (rest === "betA" || rest === "betB") {
+    const userId = interaction.user.id;
+    // Players in the match cannot bet
+    if ([...lobby.teamA, ...lobby.teamB].includes(userId))
+      return interaction.reply({ content: "❌ You can't bet on your own match.", ephemeral: true });
+    // Already bet?
+    if (lobby.bets.A.includes(userId) || lobby.bets.B.includes(userId))
+      return interaction.reply({ content: "❌ You already placed a bet on this match.", ephemeral: true });
+
+    const side = rest === "betA" ? "A" : "B";
+    lobby.bets[side].push(userId);
+    ensurePlayer(userId);
+
+    await interaction.reply({
+      content: `✅ You bet on **${teamLabel(lobby, side)}**. Good luck!`,
+      ephemeral: true
+    });
+    await lobby.channel.send(`🎰 <@${userId}> bet on **${teamLabel(lobby, side)}**!`).catch(() => {});
+    return;
+  }
 
   // ── Cancel match vote ──
   if (rest === "cancel_match") {
