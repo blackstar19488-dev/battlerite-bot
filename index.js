@@ -71,13 +71,24 @@ async function saveSeason() {
 
 function ensurePlayer(id) {
   if (!stats[id]) {
-    stats[id] = { elo: 1000, mmr: 1000, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0 };
+    stats[id] = {
+      elo: 1000, mmr: 1000, wins: 0, losses: 0, games: 0,
+      bestStreak: 0, currentStreak: 0, peakElo: 1000,
+      betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0,
+      clutchWins: 0
+    };
     saveStats();
   }
   // Migrations
   if (stats[id].mmr === undefined) { stats[id].mmr = stats[id].elo; saveStats(); }
   if (stats[id].bestStreak === undefined) { stats[id].bestStreak = 0; saveStats(); }
   if (stats[id].currentStreak === undefined) { stats[id].currentStreak = 0; saveStats(); }
+  if (stats[id].peakElo === undefined) { stats[id].peakElo = stats[id].elo; saveStats(); }
+  if (stats[id].betWins === undefined) { stats[id].betWins = 0; saveStats(); }
+  if (stats[id].betLosses === undefined) { stats[id].betLosses = 0; saveStats(); }
+  if (stats[id].betStreak === undefined) { stats[id].betStreak = 0; saveStats(); }
+  if (stats[id].bestBetStreak === undefined) { stats[id].bestBetStreak = 0; saveStats(); }
+  if (stats[id].clutchWins === undefined) { stats[id].clutchWins = 0; saveStats(); }
 }
 
 // ─── CONFIG ──────────────────────────────────────────────────────────
@@ -185,6 +196,8 @@ const queueMessages = {};
 // ─── LADDER LIVE MESSAGE ─────────────────────────────────────────────
 let ladderMsg = null;
 let ladderChannel = null;
+let betLadderMsg = null;
+let betLadderChannel = null;
 
 // ─── LOBBY STATE ─────────────────────────────────────────────────────
 const lobbies = new Map();
@@ -365,6 +378,65 @@ async function updateLadder() {
       }
     }
   } catch (err) { log("WARN", "updateLadder error:", err); }
+}
+
+// ─── BET LEADERBOARD ─────────────────────────────────────────────────
+function betLadderEmbed() {
+  const players = Object.entries(stats)
+    .filter(([, s]) => (s.betWins || 0) + (s.betLosses || 0) > 0)
+    .map(([id, s]) => ({ id, betWins: s.betWins || 0, betLosses: s.betLosses || 0, betScore: (s.betWins || 0) * 2 - (s.betLosses || 0) }))
+    .sort((a, b) => b.betScore - a.betScore)
+    .slice(0, 20);
+
+  if (players.length === 0) {
+    return new EmbedBuilder()
+      .setTitle("🎰  LobbyELO — Top 20 Bettors")
+      .setColor(0xF1C40F)
+      .setDescription("*No bets placed yet.*")
+      .setTimestamp();
+  }
+
+  const lines = players.map((p, i) => {
+    const total = p.betWins + p.betLosses;
+    const wr = total === 0 ? 0 : Math.round(p.betWins / total * 100);
+    const title = i === 0 ? " 🔮 **The Visionary**" : "";
+    if (i < 3) {
+      const medals = ["🥇", "🥈", "🥉"];
+      return `${medals[i]} **#${i + 1} — <@${p.id}>**${title}\n┣ \`${p.betWins}W / ${p.betLosses}L\`  •  \`${wr}% WR\`  •  \`Score: ${p.betScore}\`\n`;
+    }
+    return `**#${i + 1}** — <@${p.id}>  •  \`${p.betWins}W / ${p.betLosses}L\`  •  \`${wr}% WR\`  •  \`Score: ${p.betScore}\``;
+  });
+
+  const desc =
+    lines.slice(0, 3).join("\n") +
+    (players.length > 3 ? "\n**━━━━━━━━━━━━━━━━━━━━━━━━**\n" + lines.slice(3).join("\n") : "");
+
+  return new EmbedBuilder()
+    .setTitle("🎰  LobbyELO — Top 20 Bettors")
+    .setColor(0xF1C40F)
+    .setDescription(desc)
+    .setFooter({ text: "Score = Wins × 2 - Losses • Top 1 = The Visionary 🔮" })
+    .setTimestamp();
+}
+
+async function updateBetLadder() {
+  if (!betLadderChannel) return;
+  try {
+    if (betLadderMsg) {
+      await betLadderMsg.edit({ embeds: [betLadderEmbed()] }).catch(async () => {
+        betLadderMsg = await betLadderChannel.send({ embeds: [betLadderEmbed()] }).catch(() => null);
+      });
+    } else {
+      const msgs = await betLadderChannel.messages.fetch({ limit: 20 });
+      const existing = msgs.find(m => m.author.id === client.user.id && m.embeds.length > 0 && m.embeds[0].title?.includes("Bettors"));
+      if (existing) {
+        betLadderMsg = existing;
+        await betLadderMsg.edit({ embeds: [betLadderEmbed()] }).catch(() => {});
+      } else {
+        betLadderMsg = await betLadderChannel.send({ embeds: [betLadderEmbed()] }).catch(() => null);
+      }
+    }
+  } catch (err) { log("WARN", "updateBetLadder error:", err); }
 }
 
 // ─── QUEUE UI ────────────────────────────────────────────────────────
@@ -697,7 +769,7 @@ async function finishDraft(lobby) {
       await lobby.betMsg.edit({ components: [closedRow] }).catch(() => {});
     }
     await lobby.channel.send(`🎰 **Lobby #${lobby.lobbyId}** — Bets are now closed!`).catch(() => {});
-  }, 120_000);
+  }, 270_000);
 }
 
 // ─── LOBBY CREATION ──────────────────────────────────────────────────
@@ -860,7 +932,7 @@ async function startMatch(lobby) {
     .setDescription(
       `🔵 **Team ${lobby.teamNumA}:** ${A.map(id => `<@${id}>`).join(", ")}\n` +
       `🔴 **Team ${lobby.teamNumB}:** ${B.map(id => `<@${id}>`).join(", ")}\n\n` +
-      `*Place your bet! +1 ELO if you're right, -1 ELO if you're wrong.\nBets close 2 minutes after draft ends. Players in the match cannot bet.*`
+      `*Place your bet! +1 ELO if you're right, -1 ELO if you're wrong.\nBets close 4min30 after draft ends. Players in the match cannot bet.*`
     );
   const betRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(L + "betA").setLabel(`🔵 Bet Team ${lobby.teamNumA}`).setStyle(ButtonStyle.Primary),
@@ -880,17 +952,33 @@ async function finishMatch(lobby, winner) {
 
   const avgWinElo = winners.reduce((s, id) => s + (stats[id]?.elo ?? 1000), 0) / 3;
   const avgLoseElo = losers.reduce((s, id) => s + (stats[id]?.elo ?? 1000), 0) / 3;
+  const isUpset = avgWinElo < avgLoseElo;
   const changes = {};
+
+  // Check bounty: is top 1 player in the losing team?
+  const top1 = Object.entries(stats).filter(([,s]) => s.games > 0).sort(([,a],[,b]) => b.elo - a.elo)[0];
+  const top1Id = top1 ? top1[0] : null;
+  let bountyTriggered = false;
+  let bountyKiller = null;
 
   winners.forEach(id => {
     ensurePlayer(id);
+    let bonus = 0;
+    // Bounty: if top 1 is on losing team, winners get +15
+    if (top1Id && losers.includes(top1Id)) {
+      bonus = 15;
+      bountyTriggered = true;
+      if (!bountyKiller) bountyKiller = id;
+    }
     const r = calculateElo(stats[id].elo, avgLoseElo, true);
-    changes[id] = r.change;
-    stats[id].elo = r.newElo;
-    stats[id].mmr = Math.max(100, stats[id].mmr + r.change);
+    changes[id] = r.change + bonus;
+    stats[id].elo = r.newElo + bonus;
+    stats[id].mmr = Math.max(100, stats[id].mmr + r.change + bonus);
     stats[id].wins++; stats[id].games++;
     stats[id].currentStreak++;
     if (stats[id].currentStreak > stats[id].bestStreak) stats[id].bestStreak = stats[id].currentStreak;
+    if (stats[id].elo > stats[id].peakElo) stats[id].peakElo = stats[id].elo;
+    if (isUpset) stats[id].clutchWins = (stats[id].clutchWins || 0) + 1;
   });
 
   losers.forEach(id => {
@@ -912,12 +1000,18 @@ async function finishMatch(lobby, winner) {
     ensurePlayer(id);
     stats[id].elo = Math.min(9999, stats[id].elo + 1);
     stats[id].mmr = Math.min(9999, stats[id].mmr + 1);
+    stats[id].betWins = (stats[id].betWins || 0) + 1;
+    stats[id].betStreak = (stats[id].betStreak || 0) + 1;
+    if (stats[id].betStreak > (stats[id].bestBetStreak || 0)) stats[id].bestBetStreak = stats[id].betStreak;
+    if (stats[id].elo > stats[id].peakElo) stats[id].peakElo = stats[id].elo;
     betChanges[id] = +1;
   }
   for (const id of betLosers) {
     ensurePlayer(id);
     stats[id].elo = Math.max(100, stats[id].elo - 1);
     stats[id].mmr = Math.max(100, stats[id].mmr - 1);
+    stats[id].betLosses = (stats[id].betLosses || 0) + 1;
+    stats[id].betStreak = 0;
     betChanges[id] = -1;
   }
 
@@ -983,6 +1077,60 @@ async function finishMatch(lobby, winner) {
   const guild = lobby.channel.guild;
   for (const id of [...winners, ...losers]) await removeRole(guild, id, inGameRole);
   await updateLadder();
+  await updateBetLadder();
+
+  // ── Announcements in general-chat-elb ──
+  const generalCh = guild.channels.cache.find(c => c.name === "general-chat-elb" && c.isTextBased());
+  if (generalCh) {
+    // 5 win streak announcement
+    for (const id of winners) {
+      if (stats[id].currentStreak === 5) {
+        await generalCh.send({ embeds: [
+          new EmbedBuilder().setTitle("🔥  THE UNSTOPPABLE").setColor(0xFF4500)
+            .setDescription(`<@${id}> has won **5 matches in a row** without a single loss!\nCan anyone stop this player?`)
+        ] }).catch(() => {});
+      }
+    }
+
+    // 5 bet streak announcement
+    for (const id of betWinners) {
+      if (stats[id].betStreak === 5) {
+        await generalCh.send({ embeds: [
+          new EmbedBuilder().setTitle("🔮  THE ORACLE").setColor(0x9B59B6)
+            .setDescription(`<@${id}> has predicted **5 matches correctly** in a row!\nThis player sees the future.`)
+        ] }).catch(() => {});
+      }
+    }
+
+    // Bounty announcement
+    if (bountyTriggered && top1Id) {
+      await generalCh.send({ embeds: [
+        new EmbedBuilder().setTitle("🎯  BOUNTY CLAIMED!").setColor(0xE74C3C)
+          .setDescription(`<@${top1Id}> was **#1 on the ladder** and just got taken down!\nAll players on the winning team earned **+15 bonus ELO**.`)
+      ] }).catch(() => {});
+    }
+
+    // Nemesis revenge check
+    for (const wId of winners) {
+      for (const lId of losers) {
+        // Count how many times wId lost to lId before this match
+        const lossesAgainst = matchHistory.filter(m => {
+          const wTeam = m.teamA.includes(wId) ? "A" : m.teamB.includes(wId) ? "B" : null;
+          const lTeam = m.teamA.includes(lId) ? "A" : m.teamB.includes(lId) ? "B" : null;
+          if (!wTeam || !lTeam || wTeam === lTeam) return false;
+          return m.winner !== wTeam; // wId lost
+        }).length;
+        if (lossesAgainst >= 3) {
+          await generalCh.send({ embeds: [
+            new EmbedBuilder().setTitle("⚔️  REVENGE!").setColor(0xE67E22)
+              .setDescription(`<@${wId}> just defeated his **Nemesis** <@${lId}> after **${lossesAgainst} losses** against him!`)
+          ] }).catch(() => {});
+          break; // Only one revenge announcement per winner
+        }
+      }
+    }
+  }
+
   await cleanupLobby(lobby);
 }
 
@@ -1101,6 +1249,7 @@ client.on("messageCreate", async msg => {
           "`!MMR @player` — View someone else's MMR\n" +
           "`!season` — View current season info\n" +
           "`!captain` — Claim captain for your team (draft channel only)\n" +
+          "`!relation @p1 @p2` — View head-to-head stats between two players\n" +
           "`!ladder` — Check the ladder channel\n\n" +
           "**Admin only:**\n" +
           "`!setelo @player <elo>` — Set a player's ELO\n" +
@@ -1124,8 +1273,8 @@ client.on("messageCreate", async msg => {
     const targetId = mentioned ? mentioned.id : msg.author.id;
     ensurePlayer(targetId);
     const s = stats[targetId], total = s.wins + s.losses;
-    const rank = Object.entries(stats).sort(([, a], [, b]) => b.elo - a.elo).findIndex(([id]) => id === targetId) + 1;
-    const totalPlayers = Object.keys(stats).length;
+    const rank = Object.entries(stats).filter(([,st]) => st.games > 0).sort(([, a], [, b]) => b.elo - a.elo).findIndex(([id]) => id === targetId) + 1;
+    const totalPlayers = Object.entries(stats).filter(([,st]) => st.games > 0).length;
 
     // Last 10 matches
     const playerMatches = matchHistory.filter(m => [...m.teamA, ...m.teamB].includes(targetId)).slice(-10);
@@ -1134,21 +1283,46 @@ client.on("messageCreate", async msg => {
       return isWinner ? "🟢" : "🔴";
     }).join("") || "—";
 
+    // Nemesis & Prey calculation
+    const h2h = {};
+    matchHistory.forEach(m => {
+      const myTeam = m.teamA.includes(targetId) ? "A" : m.teamB.includes(targetId) ? "B" : null;
+      if (!myTeam) return;
+      const opponents = myTeam === "A" ? m.teamB : m.teamA;
+      const won = m.winner === myTeam;
+      opponents.forEach(oppId => {
+        if (!h2h[oppId]) h2h[oppId] = { winsAgainst: 0, lossesAgainst: 0 };
+        if (won) h2h[oppId].winsAgainst++;
+        else h2h[oppId].lossesAgainst++;
+      });
+    });
+    const nemesis = Object.entries(h2h).filter(([,v]) => v.lossesAgainst >= 2).sort(([,a],[,b]) => b.lossesAgainst - a.lossesAgainst)[0];
+    const prey = Object.entries(h2h).filter(([,v]) => v.winsAgainst >= 2).sort(([,a],[,b]) => b.winsAgainst - a.winsAgainst)[0];
+
+    // Clutch King check
+    const topClutch = Object.entries(stats).filter(([,st]) => st.games > 0).sort(([,a],[,b]) => (b.clutchWins||0) - (a.clutchWins||0))[0];
+    const isClutchKing = topClutch && topClutch[0] === targetId && (topClutch[1].clutchWins || 0) > 0;
+
+    const fields = [
+      { name: "ELO", value: `\`${s.elo}\``, inline: true },
+      { name: "Peak ELO", value: `\`${s.peakElo || s.elo}\``, inline: true },
+      { name: "Rank", value: `\`#${rank > 0 ? rank : "—"} / ${totalPlayers}\``, inline: true },
+      { name: "Win Rate", value: `\`${total === 0 ? 0 : Math.round(s.wins / total * 100)}%\``, inline: true },
+      { name: "Wins", value: `\`${s.wins}\``, inline: true },
+      { name: "Losses", value: `\`${s.losses}\``, inline: true },
+      { name: "Current Streak", value: `\`${s.currentStreak}W\``, inline: true },
+      { name: "Best Streak", value: `\`${s.bestStreak}W\``, inline: true },
+      { name: "Clutch Wins", value: `\`${s.clutchWins || 0}\`${isClutchKing ? " 👊 **The Clutch King**" : ""}`, inline: true },
+      { name: "Last 10", value: last10, inline: false }
+    ];
+    if (nemesis) fields.push({ name: "Nemesis", value: `<@${nemesis[0]}> (${nemesis[1].lossesAgainst} losses)`, inline: true });
+    if (prey) fields.push({ name: "Prey", value: `<@${prey[0]}> (${prey[1].winsAgainst} wins)`, inline: true });
+
     await msg.channel.send({ embeds: [
       new EmbedBuilder()
         .setTitle(`📊  Stats — ${mentioned ? mentioned.username : msg.author.username}`)
         .setColor(0x57F287)
-        .addFields(
-          { name: "ELO", value: `\`${s.elo}\``, inline: true },
-          { name: "Rank", value: `\`#${rank} / ${totalPlayers}\``, inline: true },
-          { name: "Win Rate", value: `\`${total === 0 ? 0 : Math.round(s.wins / total * 100)}%\``, inline: true },
-          { name: "Wins", value: `\`${s.wins}\``, inline: true },
-          { name: "Losses", value: `\`${s.losses}\``, inline: true },
-          { name: "Games", value: `\`${s.games}\``, inline: true },
-          { name: "Current Streak", value: `\`${s.currentStreak}W\``, inline: true },
-          { name: "Best Streak", value: `\`${s.bestStreak}W\``, inline: true },
-          { name: "Last 10", value: last10, inline: true }
-        )
+        .addFields(fields)
     ] });
     return;
   }
@@ -1175,6 +1349,47 @@ client.on("messageCreate", async msg => {
       new EmbedBuilder()
         .setTitle(`📜  Match History — ${mentioned ? mentioned.username : msg.author.username}`)
         .setColor(0x5865F2).setDescription(lines)
+    ] });
+    return;
+  }
+
+  // ── !relation ──
+  if (msg.content.startsWith("!relation")) {
+    const mentions = [...msg.mentions.users.values()];
+    if (mentions.length < 2) return msg.reply("❌ Usage: `!relation @player1 @player2`");
+    const p1 = mentions[0].id, p2 = mentions[1].id;
+    let p1vsP2 = 0, p2vsP1 = 0, together = 0, togetherWins = 0, total = 0;
+
+    matchHistory.forEach(m => {
+      const p1team = m.teamA.includes(p1) ? "A" : m.teamB.includes(p1) ? "B" : null;
+      const p2team = m.teamA.includes(p2) ? "A" : m.teamB.includes(p2) ? "B" : null;
+      if (!p1team || !p2team) return;
+      total++;
+      if (p1team === p2team) {
+        together++;
+        if (m.winner === p1team) togetherWins++;
+      } else {
+        if (m.winner === p1team) p1vsP2++;
+        else p2vsP1++;
+      }
+    });
+
+    if (total === 0) return msg.reply("No matches found between these two players.");
+
+    const vsTotal = p1vsP2 + p2vsP1;
+    const togetherWR = together === 0 ? 0 : Math.round(togetherWins / together * 100);
+
+    await msg.channel.send({ embeds: [
+      new EmbedBuilder()
+        .setTitle(`⚔️  Relation — ${mentions[0].username} vs ${mentions[1].username}`)
+        .setColor(0xE67E22)
+        .setDescription(
+          `**Total matches involving both:** ${total}\n\n` +
+          `**🤝 As teammates:** ${together} games, ${togetherWins}W / ${together - togetherWins}L (${togetherWR}% WR)\n\n` +
+          `**⚔️ As opponents:** ${vsTotal} games\n` +
+          `<@${p1}> won ${p1vsP2} times\n` +
+          `<@${p2}> won ${p2vsP1} times`
+        )
     ] });
     return;
   }
@@ -1272,7 +1487,7 @@ client.on("messageCreate", async msg => {
     const count = Object.keys(stats).length;
     Object.keys(stats).forEach(id => {
       const mmr = stats[id].mmr ?? 1000;
-      stats[id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0 };
+      stats[id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0, peakElo: 1000, betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0, clutchWins: 0 };
     });
     season = { startDate: new Date().toISOString(), matchCount: 0 };
     matchHistory = [];
@@ -1305,7 +1520,7 @@ client.on("messageCreate", async msg => {
     if (!mentioned) return msg.reply("❌ Usage: `!resetelostats @player`");
     ensurePlayer(mentioned.id);
     const mmr = stats[mentioned.id].mmr;
-    stats[mentioned.id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0 };
+    stats[mentioned.id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0, peakElo: 1000, betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0, clutchWins: 0 };
     await saveStatsNow();
     await updateLadder();
     await msg.channel.send(`✅ <@${mentioned.id}> has been reset to \`1000 ELO\`. MMR preserved at \`${mmr}\`.`);
@@ -1561,10 +1776,71 @@ client.once("ready", async () => {
   log("INFO", `Bot ready — ${client.user.tag}`);
   for (const [, guild] of client.guilds.cache) {
     await ensureRoles(guild).catch(err => log("WARN", `ensureRoles failed:`, err));
-    // Find ladder channel and initialize
     const lc = guild.channels.cache.find(c => c.name === "top-20-ladder" && c.isTextBased());
     if (lc) { ladderChannel = lc; await updateLadder(); }
+    const blc = guild.channels.cache.find(c => c.name === "top-20-ladder-bet" && c.isTextBased());
+    if (blc) { betLadderChannel = blc; await updateBetLadder(); }
   }
+
+  // Weekly recap — check every hour, post on Sundays at 20:00 UTC
+  setInterval(async () => {
+    const now = new Date();
+    if (now.getUTCDay() !== 0 || now.getUTCHours() !== 20) return;
+    for (const [, guild] of client.guilds.cache) {
+      const generalCh = guild.channels.cache.find(c => c.name === "general-chat-elb" && c.isTextBased());
+      if (!generalCh) continue;
+
+      const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const weekMatches = matchHistory.filter(m => m.timestamp > weekAgo);
+      if (weekMatches.length === 0) continue;
+
+      // Most active player
+      const activity = {};
+      weekMatches.forEach(m => [...m.teamA, ...m.teamB].forEach(id => { activity[id] = (activity[id] || 0) + 1; }));
+      const mostActive = Object.entries(activity).sort(([,a],[,b]) => b - a)[0];
+
+      // Biggest upset
+      let biggestUpset = null, biggestUpsetDiff = 0;
+      weekMatches.forEach(m => {
+        const avgA = m.teamA.reduce((s, id) => s + (stats[id]?.elo ?? 1000), 0) / 3;
+        const avgB = m.teamB.reduce((s, id) => s + (stats[id]?.elo ?? 1000), 0) / 3;
+        const diff = Math.abs(avgA - avgB);
+        const underdogWon = (avgA < avgB && m.winner === "A") || (avgB < avgA && m.winner === "B");
+        if (underdogWon && diff > biggestUpsetDiff) { biggestUpsetDiff = diff; biggestUpset = m; }
+      });
+
+      // Best duo
+      const duos = {};
+      weekMatches.forEach(m => {
+        const processTeam = (team, won) => {
+          for (let i = 0; i < team.length; i++) {
+            for (let j = i + 1; j < team.length; j++) {
+              const key = [team[i], team[j]].sort().join("_");
+              if (!duos[key]) duos[key] = { ids: [team[i], team[j]], games: 0, wins: 0 };
+              duos[key].games++;
+              if (won) duos[key].wins++;
+            }
+          }
+        };
+        processTeam(m.teamA, m.winner === "A");
+        processTeam(m.teamB, m.winner === "B");
+      });
+      const bestDuo = Object.values(duos).filter(d => d.games >= 3).sort((a, b) => (b.wins / b.games) - (a.wins / a.games))[0];
+
+      let desc = `**📊 Matches played:** ${weekMatches.length}\n`;
+      if (mostActive) desc += `**🏃 Most active:** <@${mostActive[0]}> (${mostActive[1]} games)\n`;
+      if (biggestUpset) {
+        const underdogTeam = biggestUpset.winner;
+        const underdogs = underdogTeam === "A" ? biggestUpset.teamA : biggestUpset.teamB;
+        desc += `**😱 Biggest upset:** ${underdogs.map(id => `<@${id}>`).join(", ")} won with a **${Math.round(biggestUpsetDiff)} ELO** disadvantage\n`;
+      }
+      if (bestDuo) desc += `**🤝 Best duo:** <@${bestDuo.ids[0]}> & <@${bestDuo.ids[1]}> (${bestDuo.wins}W/${bestDuo.games - bestDuo.wins}L, ${Math.round(bestDuo.wins / bestDuo.games * 100)}% WR)\n`;
+
+      await generalCh.send({ embeds: [
+        new EmbedBuilder().setTitle("📅  Weekly Recap").setColor(0xF1C40F).setDescription(desc).setTimestamp()
+      ] }).catch(() => {});
+    }
+  }, 3600_000);
 });
 
 // ─── LOGIN ───────────────────────────────────────────────────────────
