@@ -1110,25 +1110,6 @@ async function finishMatch(lobby, winner) {
       ] }).catch(() => {});
     }
 
-    // Nemesis revenge check
-    for (const wId of winners) {
-      for (const lId of losers) {
-        // Count how many times wId lost to lId before this match
-        const lossesAgainst = matchHistory.filter(m => {
-          const wTeam = m.teamA.includes(wId) ? "A" : m.teamB.includes(wId) ? "B" : null;
-          const lTeam = m.teamA.includes(lId) ? "A" : m.teamB.includes(lId) ? "B" : null;
-          if (!wTeam || !lTeam || wTeam === lTeam) return false;
-          return m.winner !== wTeam; // wId lost
-        }).length;
-        if (lossesAgainst >= 3) {
-          await generalCh.send({ embeds: [
-            new EmbedBuilder().setTitle("⚔️  REVENGE!").setColor(0xE67E22)
-              .setDescription(`<@${wId}> just defeated his **Nemesis** <@${lId}> after **${lossesAgainst} losses** against him!`)
-          ] }).catch(() => {});
-          break; // Only one revenge announcement per winner
-        }
-      }
-    }
   }
 
   await cleanupLobby(lobby);
