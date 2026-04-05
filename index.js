@@ -1378,16 +1378,26 @@ client.on("messageCreate", async msg => {
 
   // ── !totalplayer ──
   if (msg.content === "!totalplayer") {
-    const totalPlayers = Object.keys(stats).length;
-    const activePlayers = Object.entries(stats).filter(([, s]) => s.games > 0).length;
+    const all = Object.entries(stats);
+    const active = all.filter(([, s]) => s.games > 0).sort(([, a], [, b]) => b.elo - a.elo);
+    const registered = all.filter(([, s]) => s.games === 0);
+
+    let desc = `**Total: \`${all.length}\` players** (\`${active.length}\` active, \`${registered.length}\` registered only)\n\n`;
+
+    if (active.length > 0) {
+      desc += "**🎮 Active players:**\n";
+      desc += active.map(([ id, s], i) => `${i + 1}. <@${id}> — \`${s.elo} ELO\` • \`${s.games} games\``).join("\n");
+    }
+    if (registered.length > 0) {
+      desc += "\n\n**📝 Registered (0 games):**\n";
+      desc += registered.map(([id]) => `<@${id}>`).join(", ");
+    }
+
     await msg.channel.send({ embeds: [
       new EmbedBuilder()
-        .setTitle("👥  LobbyELO — Total Players")
+        .setTitle("👥  LobbyELO — All Players")
         .setColor(0x5865F2)
-        .setDescription(
-          `**Total registered:** \`${totalPlayers}\` players\n` +
-          `**With 1+ match played:** \`${activePlayers}\` players`
-        )
+        .setDescription(desc.slice(0, 4000))
     ] });
     return;
   }
