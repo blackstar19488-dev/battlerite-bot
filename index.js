@@ -104,7 +104,7 @@ const MAX_LOBBIES   = 3;
 const CANCEL_VOTES  = 4;
 const ADMIN_IDS     = ["341553327412346880", "279249193195929601"];
 
-const MAPS = ["Blackstone Arena Day", "Dragon Garden Night", "Mount Araz Night", "Meriko Night"];
+const MAPS = ["Blackstone Arena Day", "Dragon Garden Night", "Mount Araz Night"];
 
 const DRAFT_SEQ = [
   { type: "ban",  team: "A", global: true  }, { type: "ban",  team: "B", global: true  },
@@ -853,9 +853,9 @@ async function startMatch(lobby) {
   lobby.draftChannel = await guild.channels.create({
     name: `📝-lobby-draft-${lobby.lobbyId}`, type: ChannelType.GuildText, parent: lobby.category.id,
     permissionOverwrites: [
-      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ViewChannel] },
-      ...lobby.expected.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
-      { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageMessages] }
+      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.SendMessages] },
+      ...lobby.expected.map(id => ({ id, allow: [PermissionsBitField.Flags.SendMessages] })),
+      { id: client.user.id, allow: [PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageMessages] }
     ]
   });
 
