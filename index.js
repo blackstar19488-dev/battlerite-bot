@@ -75,7 +75,7 @@ function ensurePlayer(id) {
       elo: 1000, mmr: 1000, wins: 0, losses: 0, games: 0,
       bestStreak: 0, currentStreak: 0, peakElo: 1000,
       betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0,
-      clutchWins: 0
+      betScore: 0, clutchWins: 0
     };
     saveStats();
   }
@@ -88,6 +88,7 @@ function ensurePlayer(id) {
   if (stats[id].betLosses === undefined) { stats[id].betLosses = 0; saveStats(); }
   if (stats[id].betStreak === undefined) { stats[id].betStreak = 0; saveStats(); }
   if (stats[id].bestBetStreak === undefined) { stats[id].bestBetStreak = 0; saveStats(); }
+  if (stats[id].betScore === undefined) { stats[id].betScore = 0; saveStats(); }
   if (stats[id].clutchWins === undefined) { stats[id].clutchWins = 0; saveStats(); }
 }
 
@@ -384,7 +385,7 @@ async function updateLadder() {
 function betLadderEmbed() {
   const players = Object.entries(stats)
     .filter(([, s]) => (s.betWins || 0) + (s.betLosses || 0) > 0)
-    .map(([id, s]) => ({ id, betWins: s.betWins || 0, betLosses: s.betLosses || 0, betScore: (s.betWins || 0) * 2 - (s.betLosses || 0) }))
+    .map(([id, s]) => ({ id, betWins: s.betWins || 0, betLosses: s.betLosses || 0, betScore: s.betScore || 0 }))
     .sort((a, b) => b.betScore - a.betScore)
     .slice(0, 20);
 
@@ -415,7 +416,7 @@ function betLadderEmbed() {
     .setTitle("🎰  LobbyELO — Top 20 Bettors")
     .setColor(0xF1C40F)
     .setDescription(desc)
-    .setFooter({ text: "Score = Wins × 2 - Losses • Top 1 = The Visionary 🔮" })
+    .setFooter({ text: "Score = losers' points go to winners • Top 1 = The Visionary 🔮" })
     .setTimestamp();
 }
 
@@ -756,6 +757,24 @@ async function finishDraft(lobby) {
     allowedMentions: { users: [...lobby.teamA, ...lobby.teamB] }
   }).catch(() => {});
 
+  // Post draft recap in queue channel for bettors
+  const recapEmbed = new EmbedBuilder()
+    .setTitle(`📋  Lobby #${lobby.lobbyId} — Draft Recap`)
+    .setColor(0x57F287)
+    .setDescription(
+      `🗺️ **Map: ${lobby.map}**\n\n` +
+      `🌍 **Global Bans:** ${globalBansStr}\n` +
+      `🚫 **Bans T${lobby.teamNumA}:** ${regBansA}\n` +
+      `🚫 **Bans T${lobby.teamNumB}:** ${regBansB}`
+    )
+    .addFields(
+      { name: `🔵 TEAM ${lobby.teamNumA}`, value: lobby.teamA.map((id, i) => `<@${id}> — ${champDisplay(lobby.picks.A[i] ?? "?")}`).join("\n"), inline: true },
+      { name: "\u200b", value: "\u200b", inline: true },
+      { name: `🔴 TEAM ${lobby.teamNumB}`, value: lobby.teamB.map((id, i) => `<@${id}> — ${champDisplay(lobby.picks.B[i] ?? "?")}`).join("\n"), inline: true }
+    )
+    .setFooter({ text: "Place your bets before they close!" });
+  await lobby.channel.send({ embeds: [recapEmbed] }).catch(() => {});
+
   // Close bets after 2 minutes
   lobby.betTimeout = setTimeout(async () => {
     if (lobby.betsClosed) return;
@@ -850,22 +869,25 @@ async function startMatch(lobby) {
 
   lobby.category = await guild.channels.create({ name: `⚔️ LOBBY #${lobby.lobbyId}`, type: ChannelType.GuildCategory });
 
-  lobby.draftChannel = await guild.channels.create({
-    name: `📝-lobby-draft-${lobby.lobbyId}`, type: ChannelType.GuildText, parent: lobby.category.id,
-    permissionOverwrites: [
-      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.SendMessages] },
-      ...lobby.expected.map(id => ({ id, allow: [PermissionsBitField.Flags.SendMessages] })),
-      { id: client.user.id, allow: [PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageMessages] }
-    ]
-  });
-
-  // Private team chat channels — fetch valid admin members first, exclude if already a player
+  // Fetch valid admin members first, exclude if already a player
   const validAdmins = [];
   for (const id of ADMIN_IDS) {
-    if ([...A, ...B].includes(id)) continue; // Admin is a player, already has permissions
+    if ([...A, ...B].includes(id)) continue;
     const m = await guild.members.fetch(id).catch(() => null);
     if (m) validAdmins.push(id);
   }
+
+  lobby.draftChannel = await guild.channels.create({
+    name: `📝-lobby-draft-${lobby.lobbyId}`, type: ChannelType.GuildText, parent: lobby.category.id,
+    permissionOverwrites: [
+      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ViewChannel] },
+      ...lobby.expected.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] })),
+      ...validAdmins.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel] })),
+      { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageMessages] }
+    ]
+  });
+
+  // Private team chat channels
 
   lobby.chatA = await guild.channels.create({
     name: `💬-team-${lobby.teamNumA}-chat`, type: ChannelType.GuildText, parent: lobby.category.id,
@@ -995,6 +1017,7 @@ async function finishMatch(lobby, winner) {
   const betWinners = lobby.bets[winner];
   const betLosers = lobby.bets[winner === "A" ? "B" : "A"];
   const betChanges = {};
+  const scoreGain = betLosers.length; // Winners take all losers' points
 
   for (const id of betWinners) {
     ensurePlayer(id);
@@ -1004,6 +1027,7 @@ async function finishMatch(lobby, winner) {
     stats[id].betStreak = (stats[id].betStreak || 0) + 1;
     if (stats[id].betStreak > (stats[id].bestBetStreak || 0)) stats[id].bestBetStreak = stats[id].betStreak;
     if (stats[id].elo > stats[id].peakElo) stats[id].peakElo = stats[id].elo;
+    stats[id].betScore = (stats[id].betScore || 0) + scoreGain;
     betChanges[id] = +1;
   }
   for (const id of betLosers) {
@@ -1012,6 +1036,7 @@ async function finishMatch(lobby, winner) {
     stats[id].mmr = Math.max(100, stats[id].mmr - 1);
     stats[id].betLosses = (stats[id].betLosses || 0) + 1;
     stats[id].betStreak = 0;
+    stats[id].betScore = (stats[id].betScore || 0) - 1;
     betChanges[id] = -1;
   }
 
@@ -1034,8 +1059,8 @@ async function finishMatch(lobby, winner) {
   let betText = "";
   if (betWinners.length > 0 || betLosers.length > 0) {
     betText = "\n\n**🎰 Bets**\n";
-    if (betWinners.length > 0) betText += betWinners.map(id => `<@${id}> **+1** ✅`).join("\n") + "\n";
-    if (betLosers.length > 0) betText += betLosers.map(id => `<@${id}> **-1** ❌`).join("\n");
+    if (betWinners.length > 0) betText += betWinners.map(id => `<@${id}> **+1 ELO** • **+${scoreGain} score** ✅`).join("\n") + "\n";
+    if (betLosers.length > 0) betText += betLosers.map(id => `<@${id}> **-1 ELO** • **-1 score** ❌`).join("\n");
   }
 
   const resultEmbed = new EmbedBuilder()
@@ -1495,7 +1520,7 @@ client.on("messageCreate", async msg => {
     const count = Object.keys(stats).length;
     Object.keys(stats).forEach(id => {
       const mmr = stats[id].mmr ?? 1000;
-      stats[id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0, peakElo: 1000, betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0, clutchWins: 0 };
+      stats[id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0, peakElo: 1000, betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0, betScore: 0, clutchWins: 0 };
     });
     season = { startDate: new Date().toISOString(), matchCount: 0 };
     matchHistory = [];
@@ -1528,7 +1553,7 @@ client.on("messageCreate", async msg => {
     if (!mentioned) return msg.reply("❌ Usage: `!resetelostats @player`");
     ensurePlayer(mentioned.id);
     const mmr = stats[mentioned.id].mmr;
-    stats[mentioned.id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0, peakElo: 1000, betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0, clutchWins: 0 };
+    stats[mentioned.id] = { elo: 1000, mmr, wins: 0, losses: 0, games: 0, bestStreak: 0, currentStreak: 0, peakElo: 1000, betWins: 0, betLosses: 0, betStreak: 0, bestBetStreak: 0, betScore: 0, clutchWins: 0 };
     await saveStatsNow();
     await updateLadder();
     await msg.channel.send(`✅ <@${mentioned.id}> has been reset to \`1000 ELO\`. MMR preserved at \`${mmr}\`.`);
