@@ -1231,6 +1231,7 @@ client.on("messageCreate", async msg => {
           "`!season` — View current season info\n" +
           "`!captain` — Claim captain for your team (draft channel only)\n" +
           "`!relation @p1 @p2` — View head-to-head stats between two players\n" +
+          "`!totalplayer` — View total number of players registered\n" +
           "`!ladder` — Check the ladder channel\n\n" +
           "**Admin only:**\n" +
           "`!setelo @player <elo>` — Set a player's ELO\n" +
@@ -1370,6 +1371,22 @@ client.on("messageCreate", async msg => {
           `**⚔️ As opponents:** ${vsTotal} games\n` +
           `<@${p1}> won ${p1vsP2} times\n` +
           `<@${p2}> won ${p2vsP1} times`
+        )
+    ] });
+    return;
+  }
+
+  // ── !totalplayer ──
+  if (msg.content === "!totalplayer") {
+    const totalPlayers = Object.keys(stats).length;
+    const activePlayers = Object.entries(stats).filter(([, s]) => s.games > 0).length;
+    await msg.channel.send({ embeds: [
+      new EmbedBuilder()
+        .setTitle("👥  LobbyELO — Total Players")
+        .setColor(0x5865F2)
+        .setDescription(
+          `**Total registered:** \`${totalPlayers}\` players\n` +
+          `**With 1+ match played:** \`${activePlayers}\` players`
         )
     ] });
     return;
