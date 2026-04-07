@@ -88,7 +88,10 @@ function ensurePlayer(id) {
   if (stats[id].betLosses === undefined) { stats[id].betLosses = 0; saveStats(); }
   if (stats[id].betStreak === undefined) { stats[id].betStreak = 0; saveStats(); }
   if (stats[id].bestBetStreak === undefined) { stats[id].bestBetStreak = 0; saveStats(); }
-  if (stats[id].betScore === undefined) { stats[id].betScore = 0; saveStats(); }
+  if (stats[id].betScore === undefined) stats[id].betScore = 0;
+  // Sync betScore from wins/losses (fixes migration)
+  const correctScore = (stats[id].betWins || 0) - (stats[id].betLosses || 0);
+  if (stats[id].betScore !== correctScore) { stats[id].betScore = correctScore; saveStats(); }
   if (stats[id].clutchWins === undefined) { stats[id].clutchWins = 0; saveStats(); }
 }
 
@@ -1537,6 +1540,12 @@ client.on("messageCreate", async msg => {
   // ── !ladderbet ──
   if (msg.content === "!ladderbet") {
     if (ADMIN_IDS.includes(msg.author.id)) {
+      // Sync all betScores
+      for (const id of Object.keys(stats)) {
+        const correct = (stats[id].betWins || 0) - (stats[id].betLosses || 0);
+        if ((stats[id].betScore || 0) !== correct) stats[id].betScore = correct;
+      }
+      await saveStatsNow();
       await updateBetLadder();
       await msg.reply("✅ Bet ladder updated.");
     } else {
