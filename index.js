@@ -109,6 +109,7 @@ const MAPS = ["Blackstone Arena Day", "Dragon Garden Night", "Mount Araz Night"]
 
 const DRAFT_SEQ = [
   { type: "ban",  team: "A", global: true  }, { type: "ban",  team: "B", global: true  },
+  { type: "ban",  team: "A", global: false }, { type: "ban",  team: "B", global: false },
   { type: "pick", team: "A" }, { type: "pick", team: "B" },
   { type: "pick", team: "B" }, { type: "pick", team: "A" },
   { type: "ban",  team: "B", global: false }, { type: "ban",  team: "A", global: false },
@@ -193,6 +194,14 @@ async function removeRole(guild, userId, role) {
 let queue = [];
 let _queueLock = false;
 const queueMessages = {};
+
+// ─── BANNED PLAYERS ──────────────────────────────────────────────────
+const bannedFile = useDataDir ? `${DATA_DIR}/banned.json` : "./banned.json";
+let bannedPlayers = new Set(fs.existsSync(bannedFile) ? JSON.parse(fs.readFileSync(bannedFile)) : []);
+async function saveBanned() {
+  try { await fs.promises.writeFile(bannedFile, JSON.stringify([...bannedPlayers])); }
+  catch (err) { log("ERROR", "Failed to save banned:", err); }
+}
 
 // ─── LADDER LIVE MESSAGE ─────────────────────────────────────────────
 let ladderMsg = null;
@@ -416,7 +425,7 @@ function betLadderEmbed() {
     .setTitle("🎰  LobbyELO — Top 20 Bettors")
     .setColor(0xF1C40F)
     .setDescription(desc)
-    .setFooter({ text: "Score = losers' points go to winners • Top 1 = The Visionary 🔮" })
+    .setFooter({ text: "Score = +1 per win, -1 per loss • Top 1 = The Visionary 🔮" })
     .setTimestamp();
 }
 
@@ -1017,7 +1026,6 @@ async function finishMatch(lobby, winner) {
   const betWinners = lobby.bets[winner];
   const betLosers = lobby.bets[winner === "A" ? "B" : "A"];
   const betChanges = {};
-  const scoreGain = betLosers.length; // Winners take all losers' points
 
   for (const id of betWinners) {
     ensurePlayer(id);
@@ -1027,7 +1035,7 @@ async function finishMatch(lobby, winner) {
     stats[id].betStreak = (stats[id].betStreak || 0) + 1;
     if (stats[id].betStreak > (stats[id].bestBetStreak || 0)) stats[id].bestBetStreak = stats[id].betStreak;
     if (stats[id].elo > stats[id].peakElo) stats[id].peakElo = stats[id].elo;
-    stats[id].betScore = (stats[id].betScore || 0) + scoreGain;
+    stats[id].betScore = (stats[id].betScore || 0) + 1;
     betChanges[id] = +1;
   }
   for (const id of betLosers) {
@@ -1059,8 +1067,8 @@ async function finishMatch(lobby, winner) {
   let betText = "";
   if (betWinners.length > 0 || betLosers.length > 0) {
     betText = "\n\n**🎰 Bets**\n";
-    if (betWinners.length > 0) betText += betWinners.map(id => `<@${id}> **+1 ELO** • **+${scoreGain} score** ✅`).join("\n") + "\n";
-    if (betLosers.length > 0) betText += betLosers.map(id => `<@${id}> **-1 ELO** • **-1 score** ❌`).join("\n");
+    if (betWinners.length > 0) betText += betWinners.map(id => `<@${id}> **+1** ✅`).join("\n") + "\n";
+    if (betLosers.length > 0) betText += betLosers.map(id => `<@${id}> **-1** ❌`).join("\n");
   }
 
   const resultEmbed = new EmbedBuilder()
@@ -1189,7 +1197,7 @@ client.on("messageCreate", async msg => {
       const userId = msg.author.id;
       const queueChannel = msg.guild.channels.cache.find(c => c.name === "queue-lobby-elo" && c.isTextBased());
       const isQueueChannel = queueChannel && msg.channel.id === queueChannel.id;
-      if (!allLobbiesActive() && !queue.includes(userId) && !findLobbyByPlayer(userId) && !findLobbyByExpected(userId) && queue.length < 6) {
+      if (!allLobbiesActive() && !queue.includes(userId) && !findLobbyByPlayer(userId) && !findLobbyByExpected(userId) && !bannedPlayers.has(userId) && queue.length < 6) {
         ensurePlayer(userId); queue.push(userId); await addRole(msg.guild, userId, inQueueRole);
       }
       if (isQueueChannel) await refreshQueue(msg.channel, false);
@@ -1201,6 +1209,36 @@ client.on("messageCreate", async msg => {
         if (slot) startLobby(lobbyChannel, slot).catch(err => { log("ERROR", "startLobby error:", err); lobbyChannel.send("❌ Failed to create lobby."); });
       }
     } finally { _queueLock = false; }
+    return;
+  }
+
+  // ── !eloban ──
+  if (msg.content.startsWith("!eloban")) {
+    if (!ADMIN_IDS.includes(msg.author.id)) return msg.reply("❌ You don't have permission.");
+    const mentioned = msg.mentions.users.first();
+    if (!mentioned) return msg.reply("❌ Usage: `!eloban @player`");
+    bannedPlayers.add(mentioned.id);
+    await saveBanned();
+    // Remove from queue if currently in it
+    if (queue.includes(mentioned.id)) {
+      queue = queue.filter(id => id !== mentioned.id);
+      await removeRole(msg.guild, mentioned.id, inQueueRole);
+      const qc = msg.guild.channels.cache.find(c => c.name === "queue-lobby-elo" && c.isTextBased());
+      if (qc) await refreshQueue(qc, false).catch(() => {});
+    }
+    await msg.channel.send(`🔨 <@${mentioned.id}> has been banned from matchmaking.`);
+    return;
+  }
+
+  // ── !elounban ──
+  if (msg.content.startsWith("!elounban")) {
+    if (!ADMIN_IDS.includes(msg.author.id)) return msg.reply("❌ You don't have permission.");
+    const mentioned = msg.mentions.users.first();
+    if (!mentioned) return msg.reply("❌ Usage: `!elounban @player`");
+    if (!bannedPlayers.has(mentioned.id)) return msg.reply("❌ This player is not banned.");
+    bannedPlayers.delete(mentioned.id);
+    await saveBanned();
+    await msg.channel.send(`✅ <@${mentioned.id}> has been unbanned from matchmaking.`);
     return;
   }
 
@@ -1257,7 +1295,8 @@ client.on("messageCreate", async msg => {
           "`!captain` — Claim captain for your team (draft channel only)\n" +
           "`!relation @p1 @p2` — View head-to-head stats between two players\n" +
           "`!totalplayer` — View total number of players registered\n" +
-          "`!ladder` — Check the ladder channel\n\n" +
+          "`!ladder` — Check the ladder channel\n" +
+          "`!ladderbet` — Check the bet ladder channel\n\n" +
           "**Admin only:**\n" +
           "`!setelo @player <elo>` — Set a player's ELO\n" +
           "`!resetstats` — Reset all player stats (new season)\n" +
@@ -1266,6 +1305,8 @@ client.on("messageCreate", async msg => {
           "`!MMRreset` — Reset all lifetime MMR\n" +
           "`!clearqueue` — Clear the entire queue\n" +
           "`!clearqueue @player` — Silently remove a player from queue\n" +
+          "`!eloban @player` — Ban a player from matchmaking\n" +
+          "`!elounban @player` — Unban a player\n" +
           "`!resetlobby` — Reset all lobbies\n" +
           "`!resetlobby 1/2/3` — Reset a specific lobby\n" +
           "`!cancel 1/2/3` — Cancel a specific lobby"
@@ -1493,6 +1534,19 @@ client.on("messageCreate", async msg => {
     return;
   }
 
+  // ── !ladderbet ──
+  if (msg.content === "!ladderbet") {
+    if (ADMIN_IDS.includes(msg.author.id)) {
+      await updateBetLadder();
+      await msg.reply("✅ Bet ladder updated.");
+    } else {
+      const blc = msg.guild.channels.cache.find(c => c.name === "top-20-ladder-bet" && c.isTextBased());
+      if (blc) await msg.reply(`🎰 Check the bet ladder here: <#${blc.id}>`);
+      else await msg.reply("🎰 Bet ladder channel not found.");
+    }
+    return;
+  }
+
   // ── !setelo (admin) ──
   if (msg.content.startsWith("!setelo")) {
     if (!ADMIN_IDS.includes(msg.author.id)) return msg.reply("❌ You don't have permission.");
@@ -1632,6 +1686,7 @@ client.on("interactionCreate", async interaction => {
     try {
       if (allLobbiesActive()) { _queueLock = false; return interaction.reply({ content: "⏳ All lobbies are in progress. Please wait for one to finish.", ephemeral: true }); }
       await ensureRoles(interaction.guild); ensurePlayer(interaction.user.id);
+      if (bannedPlayers.has(interaction.user.id)) { _queueLock = false; return interaction.reply({ content: "❌ You are banned from matchmaking.", ephemeral: true }); }
       if (findLobbyByPlayer(interaction.user.id) || findLobbyByExpected(interaction.user.id)) { _queueLock = false; return interaction.reply({ content: "❌ You're already in an active match.", ephemeral: true }); }
       if (queue.includes(interaction.user.id)) { _queueLock = false; return interaction.reply({ content: "You're already in the queue.", ephemeral: true }); }
       if (queue.length >= 6) { _queueLock = false; return interaction.reply({ content: "The queue is full.", ephemeral: true }); }
