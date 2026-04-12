@@ -474,13 +474,9 @@ async function finishMatch(lobby,winner){
   const winLabel=teamLabel(lobby,winner);
   const avgW=winners.reduce((s,id)=>s+(st[id]?.elo??1000),0)/3,avgL=losers.reduce((s,id)=>s+(st[id]?.elo??1000),0)/3;
   const isUpset=avgW<avgL,changes={};
-  // Bounty check
-  const top1=Object.entries(st).filter(([,s])=>s.games>0).sort(([,a],[,b])=>b.elo-a.elo)[0];
-  const top1Id=top1?top1[0]:null;let bounty=false;
-  winners.forEach(id=>{ens(id);let bonus=0;
-    if(top1Id&&losers.includes(top1Id)){bonus=15;bounty=true;}
-    const r=calculateElo(st[id].elo,avgL,true);changes[id]=r.change+bonus;
-    st[id].elo=r.newElo+bonus;st[id].mmr=Math.max(100,st[id].mmr+r.change+bonus);
+  winners.forEach(id=>{ens(id);
+    const r=calculateElo(st[id].elo,avgL,true);changes[id]=r.change;
+    st[id].elo=r.newElo;st[id].mmr=Math.max(100,st[id].mmr+r.change);
     st[id].wins++;st[id].games++;st[id].currentStreak++;
     if(st[id].currentStreak>st[id].bestStreak)st[id].bestStreak=st[id].currentStreak;
     if(st[id].elo>st[id].peakElo)st[id].peakElo=st[id].elo;
@@ -527,7 +523,6 @@ async function finishMatch(lobby,winner){
   if(genCh){
     for(const id of winners){if(st[id].currentStreak===5)await genCh.send({embeds:[new EmbedBuilder().setTitle("🔥  THE UNSTOPPABLE").setColor(0xFF4500).setDescription(`<@${id}> has won **5 matches in a row**!`)]}).catch(()=>{});}
     if(!lobby.isPro){for(const id of betW){if(stats[id].betStreak===5)await genCh.send({embeds:[new EmbedBuilder().setTitle("🔮  THE ORACLE").setColor(0x9B59B6).setDescription(`<@${id}> has predicted **5 matches correctly** in a row!`)]}).catch(()=>{});}}
-    if(bounty&&top1Id)await genCh.send({embeds:[new EmbedBuilder().setTitle("🎯  BOUNTY CLAIMED!").setColor(0xE74C3C).setDescription(`<@${top1Id}> was **#1** and just got taken down!\nWinning team earned **+15 bonus ELO**.`)]}).catch(()=>{});
   }
   await cleanupLobby(lobby);
 }
