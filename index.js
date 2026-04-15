@@ -1075,6 +1075,19 @@ log("INFO",`TOKEN present: ${!!process.env.TOKEN}`);
 log("INFO",`TOKEN length: ${(process.env.TOKEN||"").length}`);
 log("INFO","Attempting Discord login...");
 const TOKEN = (process.env.TOKEN || "").trim();
+
+// Full debug to see where it hangs
+client.on("debug", info => {
+  if (info.includes("Heartbeat") || info.includes("heartbeat")) return; // skip spam
+  log("DEBUG", info);
+});
+client.on("error", e => log("ERROR", "Client error:", e.message));
+client.on("warn", w => log("WARN", "Client warn:", w));
+client.on("shardError", e => log("ERROR", "Shard error:", e.message));
+client.on("shardDisconnect", (e, id) => log("WARN", "Shard disconnect:", id));
+client.on("shardReconnecting", id => log("INFO", "Shard reconnecting:", id));
+client.on("invalidated", () => log("ERROR", "Session invalidated"));
+
 client.login(TOKEN).then(()=>{
   log("INFO","Login OK");
 }).catch(e=>{
@@ -1083,12 +1096,10 @@ client.login(TOKEN).then(()=>{
   process.exit(1);
 });
 
-client.on("error", e => log("ERROR", "Client error:", e.message));
-client.on("warn", w => log("WARN", "Client warn:", w));
-client.on("shardError", e => log("ERROR", "Shard error:", e.message));
-client.on("shardDisconnect", (e, id) => log("WARN", "Shard disconnect:", id, e));
-client.on("invalidated", () => log("ERROR", "Session invalidated"));
-
 setTimeout(() => {
-  if (!client.isReady()) log("WARN", "Bot still not ready after 30 seconds!");
+  if (!client.isReady()) {
+    log("WARN", "Bot still not ready after 30 seconds!");
+    log("WARN", "Client status:", client.ws.status);
+  }
+}, 30000);
 }, 30000);
