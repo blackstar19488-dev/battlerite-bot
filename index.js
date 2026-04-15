@@ -99,7 +99,7 @@ const CHAMP_CATEGORIES = {
   "💚 Support":["Blossom","Lucie","Oldur","Pearl","Pestilus","Poloma","Sirius","Ulric","Zander"]
 };
 const CHAMPS=Object.values(CHAMP_CATEGORIES).flat();
-const DRAFT_TIMER=75, SOLO_TIMER=20, LOBBY_TIMEOUT=200, MAX_LOBBIES=3, CANCEL_VOTES=4;
+const DRAFT_TIMER=75, LOBBY_TIMEOUT=200, MAX_LOBBIES=3, CANCEL_VOTES=4;
 const ADMIN_IDS=["341553327412346880","279249193195929601"];
 const MAPS=["Blackstone Arena Day","Dragon Garden Night","Mount Araz Night"];
 const DRAFT_SEQ=[
@@ -147,7 +147,6 @@ function createLobby(lobbyId,isPro=false) {
     boardMsg:null,announceMsg:null,lobbyPingMsg:null,activeCategory:null,
     timerInterval:null,timerTimeout:null,timerSeconds:DRAFT_TIMER,lobbyTimeout:null,
     map:null,bets:{A:[],B:[]},betMsg:null,betsClosed:false,betTimeout:null,
-    soloPhase:-1,soloPending:{A:null,B:null},soloPickedPlayers:[],
     _boardQueue:Promise.resolve()
   };
 }
@@ -349,134 +348,13 @@ async function startDraftStep(lobby){
 }
 function advanceDraft(lobby){stopTimer(lobby);lobby.activeCategory=null;lobby.draftStep++;if(lobby.draftStep>=DRAFT_SEQ.length){finishDraft(lobby).catch(e=>log("ERROR","finishDraft:",e));return;}startDraftStep(lobby).catch(e=>log("ERROR","startDraftStep:",e));}
 
-// ─── SOLOQ DRAFT SYSTEM ─────────────────────────────────────────────
-const SOLO_PHASES=["ban","pick1","pick2","pick3"];
-
-function soloBoardEmbed(lobby){
-  const ph=lobby.soloPhase,isBan=ph===0;
-  const title=`🎮  SOLOQ LOBBY #${lobby.lobbyId} — ${isBan?"Ban Phase":`Pick Tour ${ph}`}`;
-  const color=isBan?0xED4245:0x5865F2;
-  const bansStr=lobby.bans.A.length||lobby.bans.B.length
-    ?`🚫 **Bans:** ${lobby.bans.A.map(c=>champBanDisplay(c,false)).join(", ")||"—"} (T${lobby.teamNumA}) / ${lobby.bans.B.map(c=>champBanDisplay(c,false)).join(", ")||"—"} (T${lobby.teamNumB})`:"";
-  let picksStr="";
-  if(lobby.picks.A.some(x=>x)||lobby.picks.B.some(x=>x)){
-    picksStr=`\n\n**🔵 Team ${lobby.teamNumA}:**\n`+lobby.teamA.map((id,i)=>{const pp=lobby.picks.A[i];return pp?`<@${id}> — ${champDisplay(pp)}`:`<@${id}> — \`[ ? ]\``;}).join("\n")+
-      `\n\n**🔴 Team ${lobby.teamNumB}:**\n`+lobby.teamB.map((id,i)=>{const pp=lobby.picks.B[i];return pp?`<@${id}> — ${champDisplay(pp)}`:`<@${id}> — \`[ ? ]\``;}).join("\n");
-  }
-  const statusA=lobby.soloPending.A?"✅ Ready":"⏳ "+(isBan?"Banning...":"Picking...");
-  const statusB=lobby.soloPending.B?"✅ Ready":"⏳ "+(isBan?"Banning...":"Picking...");
-  const who=isBan?`**Captains ban simultaneously**\n🔵 T${lobby.teamNumA}: ${statusA}\n🔴 T${lobby.teamNumB}: ${statusB}`
-    :`**One player per team picks**\n🔵 T${lobby.teamNumA}: ${statusA}\n🔴 T${lobby.teamNumB}: ${statusB}`;
-  return new EmbedBuilder().setTitle(title).setColor(color)
-    .setDescription(`🗺️ **Map: ${lobby.map}**\n\n${bansStr}${picksStr}\n\n${who}\n\n⏱️ **${lobby.timerSeconds}s**`)
-    .setFooter({text:`${SOLO_TIMER}s per phase • auto random on timeout`});
-}
-
-function soloQCatBtns(lobby){
-  const L=`L${lobby.lobbyId}_`,isBan=lobby.soloPhase===0;
-  const st=isBan?ButtonStyle.Danger:ButtonStyle.Success;
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(L+"cat_Melee").setLabel("⚔️ Melee").setStyle(st),
-    new ButtonBuilder().setCustomId(L+"cat_Range").setLabel("🏹 Range").setStyle(st),
-    new ButtonBuilder().setCustomId(L+"cat_Support").setLabel("💚 Support").setStyle(st)),
-    cancelBtnRow(lobby)];
-}
-
-function pushSoloBoard(lobby){
-  if(!lobby.boardMsg)return;
-  lobby._boardQueue=(lobby._boardQueue||Promise.resolve()).then(async()=>{
-    if(!lobby.boardMsg)return;
-    await lobby.boardMsg.edit({embeds:[soloBoardEmbed(lobby)],components:soloQCatBtns(lobby)}).catch(()=>{});
-  }).catch(()=>{});
-}
-
-async function startSoloPhase(lobby){
-  stopTimer(lobby);
-  lobby.soloPending={A:null,B:null};
-  lobby.timerSeconds=SOLO_TIMER;
-  if(!lobby.boardMsg){
-    lobby.boardMsg=await lobby.draftChannel.send({embeds:[soloBoardEmbed(lobby)],components:soloQCatBtns(lobby)}).catch(()=>null);
-    if(!lobby.boardMsg)return;
-  }else await pushSoloBoard(lobby);
-
-  lobby.timerInterval=setInterval(async()=>{
-    lobby.timerSeconds-=5;if(lobby.timerSeconds<=0){clearInterval(lobby.timerInterval);lobby.timerInterval=null;return;}
-    await pushSoloBoard(lobby);
-  },5000);
-
-  lobby.timerTimeout=setTimeout(async()=>{
-    stopTimer(lobby);if(!lobby.active||lobby.phase!=="draft")return;
-    // Auto-random for teams that didn't act
-    const isBan=lobby.soloPhase===0;
-    for(const side of["A","B"]){
-      if(!lobby.soloPending[side]){
-        if(isBan){
-          const pool=CHAMPS.filter(c=>!lobby.bans.A.includes(c)&&!lobby.bans.B.includes(c));
-          const ch=pool[Math.floor(Math.random()*pool.length)];
-          lobby.soloPending[side]={playerId:side==="A"?lobby.captainA:lobby.captainB,champ:ch};
-        }else{
-          const team=side==="A"?lobby.teamA:lobby.teamB;
-          const oppBans=side==="A"?lobby.bans.B:lobby.bans.A;
-          const myPicks=lobby.picks[side];
-          const eligible=team.filter(id=>!lobby.soloPickedPlayers.includes(id));
-          const picker=eligible[0];
-          const pool=CHAMPS.filter(c=>!oppBans.includes(c)&&!myPicks.includes(c)&&!lobby.bans[side].includes(c));
-          const ch=pool[Math.floor(Math.random()*pool.length)]??CHAMPS[0];
-          lobby.soloPending[side]={playerId:picker,champ:ch};
-        }
-        await lobby.draftChannel.send(`⏱️ Time's up! Auto-random for **${teamLabel(lobby,side)}**.`).catch(()=>{});
-      }
-    }
-    revealSoloPhase(lobby);
-  },SOLO_TIMER*1000);
-}
-
-function checkSoloReady(lobby){
-  if(lobby.soloPending.A&&lobby.soloPending.B){
-    stopTimer(lobby);
-    revealSoloPhase(lobby);
-    return true;
-  }
-  return false;
-}
-
-function revealSoloPhase(lobby){
-  const isBan=lobby.soloPhase===0;
-  for(const side of["A","B"]){
-    const p=lobby.soloPending[side];if(!p)continue;
-    if(isBan){
-      lobby.bans[side].push(p.champ);
-    }else{
-      const team=side==="A"?lobby.teamA:lobby.teamB;
-      const idx=team.indexOf(p.playerId);
-      if(idx>=0)lobby.picks[side][idx]=p.champ;
-      lobby.soloPickedPlayers.push(p.playerId);
-    }
-  }
-  // Announce reveal
-  const pA=lobby.soloPending.A,pB=lobby.soloPending.B;
-  if(isBan){
-    lobby.draftChannel.send(`🚫 **Bans revealed!**\n🔵 T${lobby.teamNumA}: ${pA?champDisplay(pA.champ):"—"}\n🔴 T${lobby.teamNumB}: ${pB?champDisplay(pB.champ):"—"}`).catch(()=>{});
-  }else{
-    lobby.draftChannel.send(`🎯 **Picks revealed!**\n🔵 <@${pA?.playerId}>: ${pA?champDisplay(pA.champ):"—"}\n🔴 <@${pB?.playerId}>: ${pB?champDisplay(pB.champ):"—"}`).catch(()=>{});
-  }
-  lobby.soloPending={A:null,B:null};
-  // Advance to next phase
-  lobby.soloPhase++;
-  if(lobby.soloPhase>=SOLO_PHASES.length){
-    finishDraft(lobby).catch(e=>log("ERROR","finishDraft:",e));
-  }else{
-    startSoloPhase(lobby).catch(e=>log("ERROR","startSoloPhase:",e));
-  }
-}
-
 // ─── FINISH DRAFT ────────────────────────────────────────────────────
 async function finishDraft(lobby){
   stopTimer(lobby);const m=M(lobby.isPro);
   const gB=lobby.globalBans.length>0?lobby.globalBans.map(c=>champBanDisplay(c,true)).join(", "):"—";
   const rA=lobby.bans.A.length>0?lobby.bans.A.map(c=>champBanDisplay(c,false)).join(", "):"—";
   const rB=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join(", "):"—";
-  const finalEmbed=new EmbedBuilder().setTitle(`✅  ${lobby.isPro?"PRO":"SOLOQ"} LOBBY #${lobby.lobbyId} — Draft Complete!`).setColor(0x57F287)
+  const finalEmbed=new EmbedBuilder().setTitle(`✅  ${lobby.isPro?"PRO ":""}LOBBY #${lobby.lobbyId} — Draft Complete!`).setColor(0x57F287)
     .setDescription(`**▬▬▬▬▬▬ FINAL RECAP ▬▬▬▬▬▬**\n\n🗺️ **Map: ${lobby.map}**\n\n🌍 **Global Bans:** ${gB}\n🚫 **Bans T${lobby.teamNumA}:** ${rA}\n🚫 **Bans T${lobby.teamNumB}:** ${rB}`)
     .addFields({name:`🔵 TEAM ${lobby.teamNumA}${m.tag}`,value:lobby.teamA.map((id,i)=>`<@${id}>\n${champDisplay(lobby.picks.A[i]??"?")}`).join("\n\n"),inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM ${lobby.teamNumB}${m.tag}`,value:lobby.teamB.map((id,i)=>`<@${id}>\n${champDisplay(lobby.picks.B[i]??"?")}`).join("\n\n"),inline:true})
     .addFields({name:"\u200b",value:"*3 votes needed to confirm the result.*"}).setFooter({text:"Vote below to confirm the winner."});
@@ -555,7 +433,7 @@ async function startMatch(lobby){
   const{A,B}=balance(lobby.expected,st);lobby.teamA=A;lobby.teamB=B;
   lobby.captainA=pickCaptain(A,st);lobby.captainB=pickCaptain(B,st);
   for(const id of[...A,...B])await addRole(guild,id,inGameRole);
-  lobby.category=await guild.channels.create({name:`⚔️ ${lobby.isPro?"PRO":"SOLOQ"} LOBBY #${lobby.lobbyId}`,type:ChannelType.GuildCategory});
+  lobby.category=await guild.channels.create({name:`⚔️ ${lobby.isPro?"PRO ":""}LOBBY #${lobby.lobbyId}`,type:ChannelType.GuildCategory});
   // Fetch valid admins
   const validAdmins=[];for(const id of ADMIN_IDS){if([...A,...B].includes(id))continue;const mb=await guild.members.fetch(id).catch(()=>null);if(mb)validAdmins.push(id);}
   // Draft channel — visible only to 6 players + admins
@@ -586,14 +464,7 @@ async function startMatch(lobby){
       .setDescription(`🔵 **Team ${lobby.teamNumA}:** ${A.map(id=>`<@${id}>`).join(", ")}\n🔴 **Team ${lobby.teamNumB}:** ${B.map(id=>`<@${id}>`).join(", ")}\n\n*Place your bet! +1 ELO if right, -1 if wrong.\nBets close 4min30 after draft ends.*`);
     lobby.betMsg=await lobby.channel.send({embeds:[betEmbed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(L+"betA").setLabel(`🔵 Bet Team ${lobby.teamNumA}`).setStyle(ButtonStyle.Primary),new ButtonBuilder().setCustomId(L+"betB").setLabel(`🔴 Bet Team ${lobby.teamNumB}`).setStyle(ButtonStyle.Danger))]}).catch(()=>null);
   }
-  if(lobby.isPro){
-    await startDraftStep(lobby);
-  }else{
-    // SoloQ: simultaneous draft — init picks as null arrays
-    lobby.picks={A:[null,null,null],B:[null,null,null]};
-    lobby.soloPhase=0;
-    await startSoloPhase(lobby);
-  }
+  await startDraftStep(lobby);
 }
 
 // ─── FINISH MATCH ────────────────────────────────────────────────────
@@ -887,8 +758,7 @@ client.on("interactionCreate",async interaction=>{try{
       if(q.includes(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Already in queue.",ephemeral:true});}
       if(q.length>=6){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
       q.push(interaction.user.id);await addRole(interaction.guild,interaction.user.id,inQueueRole);
-      await interaction.deferUpdate().catch(()=>{});
-      await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]}).catch(()=>{});
+      await interaction.update({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]});
       if(q.length>=6){const slot=getFreeLobbySlot(lm);if(slot){await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,true)]}).catch(()=>{});startLobby(interaction.channel,slot,isPro).catch(e=>log("ERROR","startLobby:",e));}}
     }finally{if(isPro)_proQueueLock=false;else _queueLock=false;}
     return;
@@ -899,8 +769,7 @@ client.on("interactionCreate",async interaction=>{try{
     try{const q=isPro?proQueue:queue;const was=q.includes(interaction.user.id);
       if(isPro)proQueue=proQueue.filter(id=>id!==interaction.user.id);else queue=queue.filter(id=>id!==interaction.user.id);
       if(was)await removeRole(interaction.guild,interaction.user.id,inQueueRole);
-      await interaction.deferUpdate().catch(()=>{});
-      await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]}).catch(()=>{});
+      await interaction.update({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]});
     }finally{if(isPro)_proQueueLock=false;else _queueLock=false;}
     return;
   }
@@ -938,91 +807,36 @@ client.on("interactionCreate",async interaction=>{try{
 
   // ── Category ──
   if(lobby.active&&lobby.phase==="draft"&&rest.startsWith("cat_")){
-    const cat=rest.replace("cat_","");
-    if(lobby.isPro){
-      // Pro flow — defer first to avoid timeout
-      const s=stepOf(lobby);if(!s)return interaction.reply({content:"❌ Over.",ephemeral:true});
-      if(interaction.user.id!==captainOf(lobby))return interaction.reply({content:"❌ Only captain.",ephemeral:true});
-      await interaction.deferUpdate().catch(()=>{});
-      if(cat==="back")lobby.activeCategory=null;
-      else lobby.activeCategory=cat;
-      await pushBoard(lobby);return;
-    }else{
-      // SoloQ flow — ephemeral champion selection
-      const uid=interaction.user.id;
-      const side=lobby.teamA.includes(uid)?"A":lobby.teamB.includes(uid)?"B":null;
-      if(!side)return interaction.reply({content:"❌ Not in this match.",ephemeral:true});
-      if(lobby.soloPending[side])return interaction.reply({content:"❌ Your team already acted this phase.",ephemeral:true});
-      const isBan=lobby.soloPhase===0;
-      if(isBan&&uid!==(side==="A"?lobby.captainA:lobby.captainB))return interaction.reply({content:"❌ Only captain can ban.",ephemeral:true});
-      if(!isBan&&lobby.soloPickedPlayers.includes(uid))return interaction.reply({content:"❌ You already picked.",ephemeral:true});
-      const L=`L${lobby.lobbyId}_`,prefix=isBan?L+"ban_":L+"pick_",style=isBan?ButtonStyle.Danger:ButtonStyle.Success;
-      const fullKey=Object.keys(CHAMP_CATEGORIES).find(k=>k.includes(cat));
-      const oppBans=side==="A"?lobby.bans.B:lobby.bans.A,myPicks=lobby.picks[side];
-      let avail;
-      if(isBan)avail=(CHAMP_CATEGORIES[fullKey]||[]).filter(c=>!lobby.bans.A.includes(c)&&!lobby.bans.B.includes(c));
-      else avail=(CHAMP_CATEGORIES[fullKey]||[]).filter(c=>!oppBans.includes(c)&&!myPicks.includes(c));
-      const rows=[];
-      for(let i=0;i<avail.length&&rows.length<3;i+=5){const row=new ActionRowBuilder();avail.slice(i,i+5).forEach(c=>{const btn=new ButtonBuilder().setCustomId(prefix+c).setLabel(c).setStyle(style);const eid=champEmojiId(c);if(eid)btn.setEmoji(eid);row.addComponents(btn);});rows.push(row);}
-      if(!rows.length)return interaction.reply({content:"❌ No champions available in this category.",ephemeral:true});
-      await interaction.reply({content:isBan?"🚫 Choose a champion to **ban**:":"🎯 Choose your **champion**:",components:rows,ephemeral:true});return;
-    }
+    const s=stepOf(lobby);if(!s)return interaction.reply({content:"❌ Over.",ephemeral:true});
+    if(interaction.user.id!==captainOf(lobby))return interaction.reply({content:`❌ Only captain.`,ephemeral:true});
+    const cat=rest.replace("cat_","");if(cat==="back"){lobby.activeCategory=null;await interaction.update({embeds:[boardEmbed(lobby)],components:buildDraftButtons(lobby)});return;}
+    lobby.activeCategory=cat;await interaction.update({embeds:[boardEmbed(lobby)],components:buildDraftButtons(lobby)});return;
   }
 
   // ── Ban ──
   if(lobby.active&&lobby.phase==="draft"&&rest.startsWith("ban_")){
-    const ch=rest.replace("ban_","");
-    if(lobby.isPro){
-      // Pro flow
-      const s=stepOf(lobby);if(!s)return interaction.reply({content:"❌ Over.",ephemeral:true});
-      if(interaction.user.id!==captainOf(lobby))return interaction.reply({content:"❌ Only captain.",ephemeral:true});
-      if(s.type!=="ban")return interaction.reply({content:"❌ Pick phase.",ephemeral:true});
-      if(lobby.globalBans.includes(ch))return interaction.reply({content:"❌ Global banned.",ephemeral:true});
-      if(lobby.bans[s.team].includes(ch))return interaction.reply({content:"❌ Already banned.",ephemeral:true});
-      const es=lobby.draftStep;stopTimer(lobby);await interaction.deferUpdate().catch(()=>{});if(lobby.draftStep!==es)return;
-      if(s.global){lobby.globalBans.push(ch);lobby.available=lobby.available.filter(c=>c!==ch);}
-      else{lobby.bans[s.team].push(ch);const opp=s.team==="A"?"B":"A";if(lobby.bans[opp].includes(ch))lobby.available=lobby.available.filter(c=>c!==ch);}
-      advanceDraft(lobby);return;
-    }else{
-      // SoloQ ban
-      const uid=interaction.user.id;
-      const side=lobby.teamA.includes(uid)?"A":"B";
-      if(lobby.soloPending[side])return interaction.update({content:"❌ Already acted.",components:[]}).catch(()=>{});
-      lobby.soloPending[side]={playerId:uid,champ:ch};
-      await interaction.update({content:`✅ You banned **${ch}**. Waiting for opponent...`,components:[]}).catch(()=>{});
-      await pushSoloBoard(lobby);
-      checkSoloReady(lobby);return;
-    }
+    const s=stepOf(lobby);if(!s)return interaction.reply({content:"❌ Over.",ephemeral:true});
+    if(interaction.user.id!==captainOf(lobby))return interaction.reply({content:"❌ Only captain.",ephemeral:true});
+    if(s.type!=="ban")return interaction.reply({content:"❌ Pick phase.",ephemeral:true});
+    const ch=rest.replace("ban_","");if(lobby.globalBans.includes(ch))return interaction.reply({content:"❌ Global banned.",ephemeral:true});
+    if(lobby.bans[s.team].includes(ch))return interaction.reply({content:"❌ Already banned.",ephemeral:true});
+    const es=lobby.draftStep;stopTimer(lobby);await interaction.deferUpdate().catch(()=>{});if(lobby.draftStep!==es)return;
+    if(s.global){lobby.globalBans.push(ch);lobby.available=lobby.available.filter(c=>c!==ch);}
+    else{lobby.bans[s.team].push(ch);const opp=s.team==="A"?"B":"A";if(lobby.bans[opp].includes(ch))lobby.available=lobby.available.filter(c=>c!==ch);}
+    advanceDraft(lobby);return;
   }
 
   // ── Pick ──
   if(lobby.active&&lobby.phase==="draft"&&rest.startsWith("pick_")){
-    const ch=rest.replace("pick_","");
-    if(lobby.isPro){
-      // Pro flow
-      const s=stepOf(lobby);if(!s)return interaction.reply({content:"❌ Over.",ephemeral:true});
-      if(interaction.user.id!==captainOf(lobby))return interaction.reply({content:"❌ Only captain.",ephemeral:true});
-      if(s.type!=="pick")return interaction.reply({content:"❌ Ban phase.",ephemeral:true});
-      const oppBans=s.team==="A"?lobby.bans.B:lobby.bans.A,myPicks=lobby.picks[s.team];
-      if(oppBans.includes(ch)&&!lobby.bans[s.team].includes(ch))return interaction.reply({content:"❌ Banned.",ephemeral:true});
-      if(!lobby.available.includes(ch))return interaction.reply({content:"❌ Unavailable.",ephemeral:true});
-      if(myPicks.includes(ch))return interaction.reply({content:"❌ Already picked.",ephemeral:true});
-      const es=lobby.draftStep;stopTimer(lobby);await interaction.deferUpdate().catch(()=>{});if(lobby.draftStep!==es)return;
-      lobby.picks[s.team].push(ch);advanceDraft(lobby);return;
-    }else{
-      // SoloQ pick
-      const uid=interaction.user.id;
-      const side=lobby.teamA.includes(uid)?"A":"B";
-      if(lobby.soloPending[side])return interaction.update({content:"❌ Your team already acted this tour.",components:[]}).catch(()=>{});
-      if(lobby.soloPickedPlayers.includes(uid))return interaction.update({content:"❌ You already picked.",components:[]}).catch(()=>{});
-      const oppBans=side==="A"?lobby.bans.B:lobby.bans.A;
-      if(oppBans.includes(ch))return interaction.update({content:"❌ Banned by opponent.",components:[]}).catch(()=>{});
-      if(lobby.picks[side].includes(ch))return interaction.update({content:"❌ Teammate already picked this.",components:[]}).catch(()=>{});
-      lobby.soloPending[side]={playerId:uid,champ:ch};
-      await interaction.update({content:`✅ You picked **${ch}**! Waiting for opponent...`,components:[]}).catch(()=>{});
-      await pushSoloBoard(lobby);
-      checkSoloReady(lobby);return;
-    }
+    const s=stepOf(lobby);if(!s)return interaction.reply({content:"❌ Over.",ephemeral:true});
+    if(interaction.user.id!==captainOf(lobby))return interaction.reply({content:"❌ Only captain.",ephemeral:true});
+    if(s.type!=="pick")return interaction.reply({content:"❌ Ban phase.",ephemeral:true});
+    const ch=rest.replace("pick_",""),oppBans=s.team==="A"?lobby.bans.B:lobby.bans.A,myPicks=lobby.picks[s.team];
+    if(oppBans.includes(ch)&&!lobby.bans[s.team].includes(ch))return interaction.reply({content:"❌ Banned.",ephemeral:true});
+    if(!lobby.available.includes(ch))return interaction.reply({content:"❌ Unavailable.",ephemeral:true});
+    if(myPicks.includes(ch))return interaction.reply({content:"❌ Already picked.",ephemeral:true});
+    const es=lobby.draftStep;stopTimer(lobby);await interaction.deferUpdate().catch(()=>{});if(lobby.draftStep!==es)return;
+    lobby.picks[s.team].push(ch);advanceDraft(lobby);return;
   }
 
   // ── Vote ──
@@ -1062,46 +876,9 @@ client.once("ready",async()=>{
   },3600_000);
 });
 
-// ─── HTTP HEALTH CHECK (Render requires a port) ─────────────────────
-const http = require("http");
-const PORT = process.env.PORT || 10000;
-http.createServer((req, res) => {
-  res.writeHead(200, {"Content-Type": "text/plain"});
-  res.end("LobbyELO Bot is running");
-}).listen(PORT, () => log("INFO", `Health check server on port ${PORT}`));
+// ─── HEALTH CHECK ────────────────────────────────────────────────────
+require("http").createServer((q,r)=>{r.writeHead(200);r.end("ok");}).listen(process.env.PORT||10000);
 
 // ─── LOGIN ───────────────────────────────────────────────────────────
 log("INFO",`TOKEN present: ${!!process.env.TOKEN}`);
-log("INFO",`TOKEN length: ${(process.env.TOKEN||"").length}`);
-const TOKEN = (process.env.TOKEN || "").trim();
-
-// Test network connectivity first
-const https = require("https");
-https.get("https://discord.com/api/v10/gateway", (res) => {
-  let data = "";
-  res.on("data", d => data += d);
-  res.on("end", () => log("INFO", "Gateway test OK:", data));
-}).on("error", e => log("ERROR", "Gateway test FAILED:", e.message));
-
-log("INFO","Attempting Discord login...");
-client.on("debug", info => log("DEBUG", info));
-client.on("error", e => log("ERROR", "Client error:", e.message));
-client.on("warn", w => log("WARN", "Client warn:", w));
-client.on("shardError", e => log("ERROR", "Shard error:", e.message));
-client.on("shardDisconnect", (e, id) => log("WARN", "Shard disconnect:", id));
-
-client.login(TOKEN).then(()=>{
-  log("INFO","Login OK");
-}).catch(e=>{
-  log("ERROR","Login FAILED:",e.message);
-  log("ERROR","Full error:",JSON.stringify(e));
-  process.exit(1);
-});
-
-setTimeout(() => {
-  if (!client.isReady()) {
-    log("WARN", "Bot still not ready after 30 seconds!");
-    log("WARN", "WS status:", client.ws.status);
-    log("WARN", "WS ping:", client.ws.ping);
-  }
-}, 30000);
+client.login(process.env.TOKEN).then(()=>log("INFO","Login OK")).catch(e=>{log("ERROR","Login:",e.message);process.exit(1);});
