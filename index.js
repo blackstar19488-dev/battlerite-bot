@@ -1073,33 +1073,35 @@ http.createServer((req, res) => {
 // ─── LOGIN ───────────────────────────────────────────────────────────
 log("INFO",`TOKEN present: ${!!process.env.TOKEN}`);
 log("INFO",`TOKEN length: ${(process.env.TOKEN||"").length}`);
-log("INFO","Attempting Discord login...");
 const TOKEN = (process.env.TOKEN || "").trim();
 
-// Full debug to see where it hangs
-client.on("debug", info => {
-  if (info.includes("Heartbeat") || info.includes("heartbeat")) return; // skip spam
-  log("DEBUG", info);
-});
+// Test network connectivity first
+const https = require("https");
+https.get("https://discord.com/api/v10/gateway", (res) => {
+  let data = "";
+  res.on("data", d => data += d);
+  res.on("end", () => log("INFO", "Gateway test OK:", data));
+}).on("error", e => log("ERROR", "Gateway test FAILED:", e.message));
+
+log("INFO","Attempting Discord login...");
+client.on("debug", info => log("DEBUG", info));
 client.on("error", e => log("ERROR", "Client error:", e.message));
 client.on("warn", w => log("WARN", "Client warn:", w));
 client.on("shardError", e => log("ERROR", "Shard error:", e.message));
 client.on("shardDisconnect", (e, id) => log("WARN", "Shard disconnect:", id));
-client.on("shardReconnecting", id => log("INFO", "Shard reconnecting:", id));
-client.on("invalidated", () => log("ERROR", "Session invalidated"));
 
 client.login(TOKEN).then(()=>{
   log("INFO","Login OK");
 }).catch(e=>{
   log("ERROR","Login FAILED:",e.message);
-  log("ERROR","Error code:",e.code);
+  log("ERROR","Full error:",JSON.stringify(e));
   process.exit(1);
 });
 
 setTimeout(() => {
   if (!client.isReady()) {
     log("WARN", "Bot still not ready after 30 seconds!");
-    log("WARN", "Client status:", client.ws.status);
+    log("WARN", "WS status:", client.ws.status);
+    log("WARN", "WS ping:", client.ws.ping);
   }
-}, 30000);
 }, 30000);
