@@ -1062,6 +1062,14 @@ client.once("ready",async()=>{
   },3600_000);
 });
 
+// ─── HTTP HEALTH CHECK (Render requires a port) ─────────────────────
+const http = require("http");
+const PORT = process.env.PORT || 10000;
+http.createServer((req, res) => {
+  res.writeHead(200, {"Content-Type": "text/plain"});
+  res.end("LobbyELO Bot is running");
+}).listen(PORT, () => log("INFO", `Health check server on port ${PORT}`));
+
 // ─── LOGIN ───────────────────────────────────────────────────────────
 log("INFO",`TOKEN present: ${!!process.env.TOKEN}`);
 client.login(process.env.TOKEN).then(()=>log("INFO","Login OK")).catch(e=>{log("ERROR","Login:",e.message);process.exit(1);});
