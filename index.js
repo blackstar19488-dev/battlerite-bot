@@ -1072,4 +1072,23 @@ http.createServer((req, res) => {
 
 // ─── LOGIN ───────────────────────────────────────────────────────────
 log("INFO",`TOKEN present: ${!!process.env.TOKEN}`);
-client.login(process.env.TOKEN).then(()=>log("INFO","Login OK")).catch(e=>{log("ERROR","Login:",e.message);process.exit(1);});
+log("INFO",`TOKEN length: ${(process.env.TOKEN||"").length}`);
+log("INFO","Attempting Discord login...");
+const TOKEN = (process.env.TOKEN || "").trim();
+client.login(TOKEN).then(()=>{
+  log("INFO","Login OK");
+}).catch(e=>{
+  log("ERROR","Login FAILED:",e.message);
+  log("ERROR","Error code:",e.code);
+  process.exit(1);
+});
+
+client.on("error", e => log("ERROR", "Client error:", e.message));
+client.on("warn", w => log("WARN", "Client warn:", w));
+client.on("shardError", e => log("ERROR", "Shard error:", e.message));
+client.on("shardDisconnect", (e, id) => log("WARN", "Shard disconnect:", id, e));
+client.on("invalidated", () => log("ERROR", "Session invalidated"));
+
+setTimeout(() => {
+  if (!client.isReady()) log("WARN", "Bot still not ready after 30 seconds!");
+}, 30000);
