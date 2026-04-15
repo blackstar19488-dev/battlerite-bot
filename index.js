@@ -887,7 +887,8 @@ client.on("interactionCreate",async interaction=>{try{
       if(q.includes(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Already in queue.",ephemeral:true});}
       if(q.length>=6){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
       q.push(interaction.user.id);await addRole(interaction.guild,interaction.user.id,inQueueRole);
-      await interaction.update({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]});
+      await interaction.deferUpdate().catch(()=>{});
+      await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]}).catch(()=>{});
       if(q.length>=6){const slot=getFreeLobbySlot(lm);if(slot){await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,true)]}).catch(()=>{});startLobby(interaction.channel,slot,isPro).catch(e=>log("ERROR","startLobby:",e));}}
     }finally{if(isPro)_proQueueLock=false;else _queueLock=false;}
     return;
@@ -898,7 +899,8 @@ client.on("interactionCreate",async interaction=>{try{
     try{const q=isPro?proQueue:queue;const was=q.includes(interaction.user.id);
       if(isPro)proQueue=proQueue.filter(id=>id!==interaction.user.id);else queue=queue.filter(id=>id!==interaction.user.id);
       if(was)await removeRole(interaction.guild,interaction.user.id,inQueueRole);
-      await interaction.update({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]});
+      await interaction.deferUpdate().catch(()=>{});
+      await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]}).catch(()=>{});
     }finally{if(isPro)_proQueueLock=false;else _queueLock=false;}
     return;
   }
