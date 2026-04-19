@@ -150,6 +150,7 @@ async function removeRole(g,u,r){if(!r||!g)return;const m=await g.members.fetch(
 
 // ─── STATE ───────────────────────────────────────────────────────────
 let queue=[],proQueue=[],_queueLock=false,_proQueueLock=false;
+const proQueueJoinTime={}; // {playerId: timestamp} for 1h auto-leave
 let _proPlacementDelay=null; // {timeout, channel, startTime}
 const queueMessages={},proQueueMessages={};
 let ladderMsg=null,ladderChannel=null,betLadderMsg=null,betLadderChannel=null,proLadderMsg=null,proLadderChannel=null;
@@ -455,6 +456,8 @@ async function startLobby(channel,lobbyId,isPro=false){
   const lobby=createLobby(lobbyId,isPro);
   lobby.active=true;lobby.phase="waiting";lobby.channel=channel;
   lobby.expected=q.splice(0,6);
+  // Clear join timestamps for players entering the lobby
+  if(isPro)for(const id of lobby.expected)delete proQueueJoinTime[id];
   // Remove these players from the OTHER queue too
   const otherQ=isPro?queue:proQueue;
   for(const id of lobby.expected){const idx=otherQ.indexOf(id);if(idx>=0)otherQ.splice(idx,1);}
@@ -706,6 +709,7 @@ client.on("messageCreate",async msg=>{try{
       const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
       if(!allSlotsActive(lm)&&!q.includes(userId)&&!findLobbyByPlayer(userId)&&!findLobbyByExpected(userId)&&!bannedPlayers.has(userId)&&q.length<maxSlots){
         m.ensure(userId);q.push(userId);await addRole(msg.guild,userId,inQueueRole);
+        if(isPro)proQueueJoinTime[userId]=Date.now();
         // Pro placement delay swap logic
         if(isPro&&_proPlacementDelay&&!placementPlayers.has(userId)){
           clearTimeout(_proPlacementDelay);_proPlacementDelay=null;
@@ -740,7 +744,7 @@ client.on("messageCreate",async msg=>{try{
   // ── !eloban / !elounban ──
   if(content.startsWith("!eloban")){if(!ADMIN_IDS.includes(msg.author.id))return;const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!eloban @player`");bannedPlayers.add(u.id);await saveBanned();
     if(queue.includes(u.id)){queue=queue.filter(id=>id!==u.id);await removeRole(msg.guild,u.id,inQueueRole);}
-    if(proQueue.includes(u.id)){proQueue=proQueue.filter(id=>id!==u.id);await removeRole(msg.guild,u.id,inQueueRole);}
+    if(proQueue.includes(u.id)){proQueue=proQueue.filter(id=>id!==u.id);delete proQueueJoinTime[u.id];await removeRole(msg.guild,u.id,inQueueRole);}
     await msg.channel.send(`🔨 <@${u.id}> banned from matchmaking.`);return;}
   if(content.startsWith("!elounban")){if(!ADMIN_IDS.includes(msg.author.id))return;const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!elounban @player`");bannedPlayers.delete(u.id);await saveBanned();await msg.channel.send(`✅ <@${u.id}> unbanned.`);return;}
 
@@ -772,9 +776,36 @@ client.on("messageCreate",async msg=>{try{
 
   // ── !help ──
   if(content==="!help"){await msg.channel.send({embeds:[new EmbedBuilder().setTitle("📖  LobbyELO — Commands").setColor(0x5865F2).setDescription(
-    "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!stats pro` — Your stats\n`!stats @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n\n"+
+    "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`"
   )]});return;}
+
+  // ── !statspro (shortcut for !stats pro) ──
+  if(content.startsWith("!statspro")){
+    const mentioned=msg.mentions.users.first(),targetId=mentioned?mentioned.id:msg.author.id;
+    const m=M(true),st=m.stats;m.ensure(targetId);const s=st[targetId],total=s.wins+s.losses;
+    const ranked=Object.entries(st).filter(([,x])=>x.games>0).sort(([,a],[,b])=>b.elo-a.elo);
+    const rank=ranked.findIndex(([id])=>id===targetId)+1;
+    const pMatches=(m.history).filter(x=>[...x.teamA,...x.teamB].includes(targetId)).slice(-10);
+    const last10=pMatches.map(x=>{const w=(x.winner==="A"&&x.teamA.includes(targetId))||(x.winner==="B"&&x.teamB.includes(targetId));return w?"🟢":"🔴";}).join("")||"—";
+    const h2h={};m.history.forEach(x=>{const my=x.teamA.includes(targetId)?"A":x.teamB.includes(targetId)?"B":null;if(!my)return;const opps=my==="A"?x.teamB:x.teamA;const won=x.winner===my;opps.forEach(o=>{if(!h2h[o])h2h[o]={w:0,l:0};if(won)h2h[o].w++;else h2h[o].l++;});});
+    const nem=Object.entries(h2h).filter(([,v])=>v.l>=2).sort(([,a],[,b])=>b.l-a.l)[0];
+    const prey=Object.entries(h2h).filter(([,v])=>v.w>=2).sort(([,a],[,b])=>b.w-a.w)[0];
+    const topC=Object.entries(st).filter(([,x])=>x.games>0).sort(([,a],[,b])=>(b.clutchWins||0)-(a.clutchWins||0))[0];
+    const isCK=topC&&topC[0]===targetId&&(topC[1].clutchWins||0)>0;
+    const fields=[
+      {name:"ELO",value:`\`${s.elo}\``,inline:true},{name:"Peak ELO",value:`\`${s.peakElo||s.elo}\``,inline:true},
+      {name:"Rank",value:`\`#${rank>0?rank:"—"} / ${ranked.length}\``,inline:true},
+      {name:"Win Rate",value:`\`${total===0?0:Math.round(s.wins/total*100)}%\``,inline:true},
+      {name:"Wins",value:`\`${s.wins}\``,inline:true},{name:"Losses",value:`\`${s.losses}\``,inline:true},
+      {name:"Streak",value:`\`${s.currentStreak}W\``,inline:true},{name:"Best",value:`\`${s.bestStreak}W\``,inline:true},
+      {name:"Clutch",value:`\`${s.clutchWins||0}\`${isCK?" 👊 **Clutch King**":""}`,inline:true},
+      {name:"Last 10",value:last10,inline:false}
+    ];
+    if(nem)fields.push({name:"Nemesis",value:`<@${nem[0]}> (${nem[1].l} losses)`,inline:true});
+    if(prey)fields.push({name:"Prey",value:`<@${prey[0]}> (${prey[1].w} wins)`,inline:true});
+    await msg.channel.send({embeds:[new EmbedBuilder().setTitle(`📊  Pro Stats — ${mentioned?mentioned.username:msg.author.username}`).setColor(0xDAA520).addFields(fields)]});return;
+  }
 
   // ── !stats ──
   if(base.startsWith("!stats")&&!base.startsWith("!statsreset")){
@@ -923,6 +954,7 @@ client.on("interactionCreate",async interaction=>{try{
       const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
       if(q.length>=maxSlots){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
       q.push(interaction.user.id);await addRole(interaction.guild,interaction.user.id,inQueueRole);
+      if(isPro)proQueueJoinTime[interaction.user.id]=Date.now();
 
       // If pro, a 15s delay is pending, and this new player is NOT a placement → swap with placement and start immediately
       if(isPro&&_proPlacementDelay){
@@ -951,6 +983,7 @@ client.on("interactionCreate",async interaction=>{try{
     if(isPro)_proQueueLock=true;else _queueLock=true;
     try{const q=isPro?proQueue:queue;const was=q.includes(interaction.user.id);
       if(isPro)proQueue=proQueue.filter(id=>id!==interaction.user.id);else queue=queue.filter(id=>id!==interaction.user.id);
+      if(isPro)delete proQueueJoinTime[interaction.user.id];
       if(was)await removeRole(interaction.guild,interaction.user.id,inQueueRole);
       // Cancel placement delay if queue dropped below 6
       if(isPro&&_proPlacementDelay&&proQueue.length<6){clearTimeout(_proPlacementDelay);_proPlacementDelay=null;}
@@ -1098,6 +1131,30 @@ client.once("ready",async()=>{
     }
     if(anyChange){await saveProActivity();await saveProStatsNow();await updateProLadder();}
   },3600_000);
+
+  // ── 1h auto-leave for pro queue (check every minute) ──
+  setInterval(async()=>{
+    if(proQueue.length===0)return;
+    const now=Date.now(),ONE_HOUR=3600_000;
+    const toRemove=[];
+    for(const id of proQueue){
+      const joinTs=proQueueJoinTime[id];
+      if(joinTs&&(now-joinTs)>=ONE_HOUR)toRemove.push(id);
+    }
+    if(toRemove.length===0)return;
+    proQueue=proQueue.filter(id=>!toRemove.includes(id));
+    for(const[,guild]of client.guilds.cache){
+      for(const id of toRemove){
+        delete proQueueJoinTime[id];
+        await removeRole(guild,id,inQueueRole);
+        const mb=await guild.members.fetch(id).catch(()=>null);
+        if(mb)await mb.send(`⏰ You've been removed from the Pro queue after 1 hour of inactivity. No match popped during that time.`).catch(()=>{});
+      }
+      const qCh=guild.channels.cache.find(c=>c.name==="queue-elb-pro"&&c.isTextBased());
+      if(qCh)await refreshQueue(qCh,true).catch(()=>{});
+    }
+    log("INFO",`Removed ${toRemove.length} inactive players from pro queue after 1h`);
+  },60_000);
 });
 
 // ─── HEALTH CHECK ────────────────────────────────────────────────────
