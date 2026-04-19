@@ -150,6 +150,7 @@ async function removeRole(g,u,r){if(!r||!g)return;const m=await g.members.fetch(
 
 // ─── STATE ───────────────────────────────────────────────────────────
 let queue=[],proQueue=[],_queueLock=false,_proQueueLock=false;
+let _proPlacementDelay=null; // {timeout, channel, startTime}
 const queueMessages={},proQueueMessages={};
 let ladderMsg=null,ladderChannel=null,betLadderMsg=null,betLadderChannel=null,proLadderMsg=null,proLadderChannel=null;
 const lobbies=new Map(),proLobbies=new Map();
@@ -172,6 +173,47 @@ function createLobby(lobbyId,isPro=false) {
 
 function getFreeLobbySlot(lm){for(let i=1;i<=3;i++)if(!lm.has(i))return i;return null;}
 function allSlotsActive(lm){return lm.has(1)&&lm.has(2)&&lm.has(3);}
+
+// Trigger lobby start for a queue — handles placement delay for pro
+function tryStartLobby(channel,isPro){
+  const q=isPro?proQueue:queue;
+  const lm=isPro?proLobbies:lobbies;
+  if(q.length<6)return;
+  const slot=getFreeLobbySlot(lm);
+  if(!slot)return;
+
+  // For pro: check if any placement player is in the first 6 → delay 15s
+  if(isPro){
+    const first6=q.slice(0,6);
+    const placementsInSix=first6.filter(id=>placementPlayers.has(id));
+    if(placementsInSix.length>0){
+      // If there are enough non-placement players waiting (q.length >= 6 + placementsInSix), swap them out now
+      const nonPlacementAll=q.filter(id=>!placementPlayers.has(id));
+      if(nonPlacementAll.length>=6){
+        // Can start without placements — put placements at the back
+        const placementsToMove=first6.filter(id=>placementPlayers.has(id));
+        const newQ=q.filter(id=>!placementsToMove.includes(id));
+        newQ.push(...placementsToMove);
+        proQueue.length=0;proQueue.push(...newQ);
+        refreshQueue(channel,true).catch(()=>{});
+        startLobby(channel,slot,true).catch(e=>log("ERROR","startLobby:",e));
+        return;
+      }
+      // Otherwise start 15s delay (if not already running)
+      if(_proPlacementDelay)return;
+      channel.send(`⏳ **Lobby ready with ${placementsInSix.length} placement player(s)** — waiting 15 seconds for a non-placement player to join...`).catch(()=>{});
+      _proPlacementDelay=setTimeout(async()=>{
+        _proPlacementDelay=null;
+        // Start lobby after 15s with placement players still included
+        const slot2=getFreeLobbySlot(proLobbies);
+        if(slot2&&proQueue.length>=6)startLobby(channel,slot2,true).catch(e=>log("ERROR","startLobby:",e));
+      },15000);
+      return;
+    }
+  }
+  // Normal case: start immediately
+  startLobby(channel,slot,isPro).catch(e=>log("ERROR","startLobby:",e));
+}
 function findLobbyByDraftChannel(chId){
   for(const[,l]of lobbies)if(l.draftChannel&&l.draftChannel.id===chId)return l;
   for(const[,l]of proLobbies)if(l.draftChannel&&l.draftChannel.id===chId)return l;
@@ -280,11 +322,18 @@ function queueEmbed(isPro){
   const slot=getFreeLobbySlot(lm);
   const next=slot?`Lobby #${slot}${m.tag}`:null;
   const title=isPro?`⚔️🔥 PRO QUEUE — Battlerite 3v3${next?` (${next})`:""}`:`⚔️ Battlerite 3v3 — Queue${next?` (${next})`:""}`;
+  // Non-priority count: only pro, placement players don't count as priority
+  const hasPlacement=isPro&&q.some(id=>placementPlayers.has(id));
+  const totalSlots=hasPlacement?7:6;
   let desc;
   if(!next)desc=`*⏳ All ${isPro?"pro ":""}lobbies are in progress. Please wait.*`;
   else if(q.length===0)desc=isPro?"*Queue is empty — click **Join** to enter!\nOnly players with the Pro role can queue.*":"*Queue is empty — click **Join** to enter!*";
-  else desc=q.map((id,i)=>`**${i+1}.** <@${id}> — \`${(m.stats[id]?.elo??1000)} ELO\``).join("\n");
-  return new EmbedBuilder().setTitle(title).setColor(m.color).setDescription(desc).setFooter({text:`${q.length} / 6 players`});
+  else desc=q.map((id,i)=>{
+    const isPlace=isPro&&placementPlayers.has(id);
+    const name=isPlace?`🔴 **<@${id}> (non-priority)**`:`<@${id}>`;
+    return `**${i+1}.** ${name} — \`${(m.stats[id]?.elo??1000)} ELO\``;
+  }).join("\n");
+  return new EmbedBuilder().setTitle(title).setColor(m.color).setDescription(desc).setFooter({text:`${q.length} / ${totalSlots} players${hasPlacement?" (placement in queue)":""}`});
 }
 function queueBtns(isPro,disabled=false){
   const lm=isPro?proLobbies:lobbies;const blocked=allSlotsActive(lm);const pre=isPro?"pq_":"q_";
@@ -631,7 +680,7 @@ async function cleanupLobby(lobby){
   if(lobby.category)await lobby.category.delete().catch(()=>{});
   const ch=lobby.channel,lm=lobby.isPro?proLobbies:lobbies,q=lobby.isPro?proQueue:queue;
   lm.delete(lobby.lobbyId);
-  if(ch){await refreshQueue(ch,lobby.isPro,false).catch(()=>{});if(q.length>=6){const slot=getFreeLobbySlot(lm);if(slot)await startLobby(ch,slot,lobby.isPro).catch(e=>log("ERROR","auto-start:",e));}}
+  if(ch){await refreshQueue(ch,lobby.isPro,false).catch(()=>{});tryStartLobby(ch,lobby.isPro);}
 }
 
 // ─── COMMANDS ────────────────────────────────────────────────────────
@@ -654,11 +703,24 @@ client.on("messageCreate",async msg=>{try{
       if(isPro){const member=await msg.guild.members.fetch(userId).catch(()=>null);if(!member||!member.roles.cache.some(r=>r.name==="Pro")){if(isPro)_proQueueLock=false;return;}}
       const qCh=msg.guild.channels.cache.find(c=>c.name===m.qCh&&c.isTextBased());
       const isQCh=qCh&&msg.channel.id===qCh.id;
-      if(!allSlotsActive(lm)&&!q.includes(userId)&&!findLobbyByPlayer(userId)&&!findLobbyByExpected(userId)&&!bannedPlayers.has(userId)&&q.length<6){
+      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
+      if(!allSlotsActive(lm)&&!q.includes(userId)&&!findLobbyByPlayer(userId)&&!findLobbyByExpected(userId)&&!bannedPlayers.has(userId)&&q.length<maxSlots){
         m.ensure(userId);q.push(userId);await addRole(msg.guild,userId,inQueueRole);
+        // Pro placement delay swap logic
+        if(isPro&&_proPlacementDelay&&!placementPlayers.has(userId)){
+          clearTimeout(_proPlacementDelay);_proPlacementDelay=null;
+          const firstPlacementIdx=proQueue.findIndex(id=>placementPlayers.has(id));
+          if(firstPlacementIdx>=0){
+            const placeId=proQueue.splice(firstPlacementIdx,1)[0];proQueue.push(placeId);
+            const pm=await msg.guild.members.fetch(placeId).catch(()=>null);
+            if(pm)await pm.send(`📋 You were swapped out of the Pro queue because a non-placement player joined.`).catch(()=>{});
+            await msg.channel.send(`✅ Non-placement player <@${userId}> joined — <@${placeId}> was swapped out.`).catch(()=>{});
+          }
+        }
       }
       if(isQCh)await refreshQueue(msg.channel,isPro);else if(qCh)await refreshQueue(qCh,isPro).catch(()=>{});else await refreshQueue(msg.channel,isPro);
-      if(q.length>=6){const slot=getFreeLobbySlot(lm);const lCh=isQCh?msg.channel:(qCh||msg.channel);if(slot)startLobby(lCh,slot,isPro).catch(e=>log("ERROR","startLobby:",e));}
+      const lCh=isQCh?msg.channel:(qCh||msg.channel);
+      tryStartLobby(lCh,isPro);
     }finally{if(isPro)_proQueueLock=false;else _queueLock=false;}
     return;
   }
@@ -857,10 +919,30 @@ client.on("interactionCreate",async interaction=>{try{
       if(bannedPlayers.has(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ You are banned.",ephemeral:true});}
       if(findLobbyByPlayer(interaction.user.id)||findLobbyByExpected(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ Already in a match.",ephemeral:true});}
       if(q.includes(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Already in queue.",ephemeral:true});}
-      if(q.length>=6){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
+      // Queue full check — pro allows 7 if placements in queue
+      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
+      if(q.length>=maxSlots){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
       q.push(interaction.user.id);await addRole(interaction.guild,interaction.user.id,inQueueRole);
-      await interaction.update({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]});
-      if(q.length>=6){const slot=getFreeLobbySlot(lm);if(slot){await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,true)]}).catch(()=>{});startLobby(interaction.channel,slot,isPro).catch(e=>log("ERROR","startLobby:",e));}}
+
+      // If pro, a 15s delay is pending, and this new player is NOT a placement → swap with placement and start immediately
+      if(isPro&&_proPlacementDelay){
+        if(!placementPlayers.has(interaction.user.id)){
+          clearTimeout(_proPlacementDelay);_proPlacementDelay=null;
+          // Find first placement player in queue and move them to the back
+          const firstPlacementIdx=proQueue.findIndex(id=>placementPlayers.has(id));
+          if(firstPlacementIdx>=0){
+            const placeId=proQueue.splice(firstPlacementIdx,1)[0];
+            proQueue.push(placeId);
+            const placedMember=await interaction.guild.members.fetch(placeId).catch(()=>null);
+            if(placedMember)await placedMember.send(`📋 You were swapped out of the Pro queue because a non-placement player joined. You've been moved to the next lobby.`).catch(()=>{});
+            await interaction.channel.send(`✅ Non-placement player <@${interaction.user.id}> joined — <@${placeId}> was swapped out to the next lobby.`).catch(()=>{});
+          }
+        }
+      }
+
+      await interaction.deferUpdate().catch(()=>{});
+      await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]}).catch(()=>{});
+      tryStartLobby(interaction.channel,isPro);
     }finally{if(isPro)_proQueueLock=false;else _queueLock=false;}
     return;
   }
@@ -870,7 +952,10 @@ client.on("interactionCreate",async interaction=>{try{
     try{const q=isPro?proQueue:queue;const was=q.includes(interaction.user.id);
       if(isPro)proQueue=proQueue.filter(id=>id!==interaction.user.id);else queue=queue.filter(id=>id!==interaction.user.id);
       if(was)await removeRole(interaction.guild,interaction.user.id,inQueueRole);
-      await interaction.update({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]});
+      // Cancel placement delay if queue dropped below 6
+      if(isPro&&_proPlacementDelay&&proQueue.length<6){clearTimeout(_proPlacementDelay);_proPlacementDelay=null;}
+      await interaction.deferUpdate().catch(()=>{});
+      await interaction.message.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro)]}).catch(()=>{});
     }finally{if(isPro)_proQueueLock=false;else _queueLock=false;}
     return;
   }
