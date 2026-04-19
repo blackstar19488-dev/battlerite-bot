@@ -26,6 +26,15 @@ let proStats = fs.existsSync(proStatsFile) ? JSON.parse(fs.readFileSync(proStats
 let proMatchHistory = fs.existsSync(proHistoryFile) ? JSON.parse(fs.readFileSync(proHistoryFile)) : [];
 let proSeason = fs.existsSync(proSeasonFile) ? JSON.parse(fs.readFileSync(proSeasonFile)) : { startDate: new Date().toISOString(), matchCount: 0 };
 let bannedPlayers = new Set(fs.existsSync(bannedFile) ? JSON.parse(fs.readFileSync(bannedFile)) : []);
+const placementFile = p("placement.json");
+let placementPlayers = new Set(fs.existsSync(placementFile) ? JSON.parse(fs.readFileSync(placementFile)) : []);
+async function savePlacement(){try{await fs.promises.writeFile(placementFile,JSON.stringify([...placementPlayers]));}catch(e){}}
+
+// ─── PRO ACTIVITY & AFK TRACKING ─────────────────────────────────────
+const proActivityFile = p("pro-activity.json");
+let proActivity = fs.existsSync(proActivityFile) ? JSON.parse(fs.readFileSync(proActivityFile)) : {}; // {playerId: {lastGame:ts, decayCount:N, afks:[ts1,ts2,...]}}
+async function saveProActivity(){try{await fs.promises.writeFile(proActivityFile,JSON.stringify(proActivity,null,2));}catch(e){}}
+function ensureProActivity(id){if(!proActivity[id])proActivity[id]={lastGame:Date.now(),decayCount:0,afks:[]};}
 
 // Save helpers
 let _saveTimer=null,_saving=false,_proSaveTimer=null,_proSaving=false;
@@ -102,6 +111,16 @@ const CHAMPS=Object.values(CHAMP_CATEGORIES).flat();
 const DRAFT_TIMER=75, LOBBY_TIMEOUT=200, MAX_LOBBIES=3, CANCEL_VOTES=4;
 const ADMIN_IDS=["341553327412346880","279249193195929601"];
 const MAPS=["Blackstone Arena Day","Dragon Garden Night","Mount Araz Night"];
+// Pro weights: Mount Araz -10% relative to the others
+// Normal: 33/33/33. Pro: Blackstone 36.67, Dragon 36.67, Mount Araz 26.67 (~-10%)
+function pickMap(isPro){
+  if(!isPro)return MAPS[Math.floor(Math.random()*MAPS.length)];
+  // Weighted: Blackstone=1, Dragon=1, Mount Araz=0.73 (10% less)
+  const weights=[1,1,0.73],total=weights.reduce((a,b)=>a+b,0);
+  let r=Math.random()*total;
+  for(let i=0;i<MAPS.length;i++){r-=weights[i];if(r<=0)return MAPS[i];}
+  return MAPS[0];
+}
 const DRAFT_SEQ=[
   {type:"ban",team:"A",global:true},{type:"ban",team:"B",global:true},
   {type:"ban",team:"A",global:false},{type:"ban",team:"B",global:false},
@@ -365,19 +384,20 @@ async function finishDraft(lobby){
   else lobby.boardMsg=await lobby.draftChannel.send({embeds:[finalEmbed],components:rows}).catch(()=>null);
   lobby.phase="vote";
   await lobby.draftChannel.send({content:`🎮 **Draft complete!** ${[...lobby.teamA,...lobby.teamB].map(id=>`<@${id}>`).join(" ")} — Go play **${lobby.map}**!`,allowedMentions:{users:[...lobby.teamA,...lobby.teamB]}}).catch(()=>{});
-  // Post recap in queue channel for bettors (normal only)
-  if(!lobby.isPro){
-    const recapEmbed=new EmbedBuilder().setTitle(`📋  Lobby #${lobby.lobbyId} — Draft Recap`).setColor(0x57F287)
-      .setDescription(`🗺️ **Map: ${lobby.map}**\n\n🌍 **Global Bans:** ${gB}\n🚫 **Bans T${lobby.teamNumA}:** ${rA}\n🚫 **Bans T${lobby.teamNumB}:** ${rB}`)
-      .addFields({name:`🔵 TEAM ${lobby.teamNumA}`,value:lobby.teamA.map((id,i)=>`<@${id}> — ${champDisplay(lobby.picks.A[i]??"?")}`).join("\n"),inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM ${lobby.teamNumB}`,value:lobby.teamB.map((id,i)=>`<@${id}> — ${champDisplay(lobby.picks.B[i]??"?")}`).join("\n"),inline:true})
-      .setFooter({text:"Place your bets before they close!"});
-    await lobby.channel.send({embeds:[recapEmbed]}).catch(()=>{});
-    // Close bets after 4m30
-    lobby.betTimeout=setTimeout(async()=>{if(lobby.betsClosed)return;lobby.betsClosed=true;
-      if(lobby.betMsg){const LL=`L${lobby.lobbyId}_`;const cr=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(LL+"betA").setLabel("🔵 Bets closed").setStyle(ButtonStyle.Primary).setDisabled(true),new ButtonBuilder().setCustomId(LL+"betB").setLabel("🔴 Bets closed").setStyle(ButtonStyle.Danger).setDisabled(true));await lobby.betMsg.edit({components:[cr]}).catch(()=>{});}
-      await lobby.channel.send(`🎰 **Lobby #${lobby.lobbyId}** — Bets are now closed!`).catch(()=>{});
-    },270_000);
-  }
+  // Post recap for bettors (normal in queue channel, pro in bet-pro)
+  const recapEmbed=new EmbedBuilder().setTitle(`📋  ${lobby.isPro?"Pro ":""}Lobby #${lobby.lobbyId} — Draft Recap`).setColor(0x57F287)
+    .setDescription(`🗺️ **Map: ${lobby.map}**\n\n🌍 **Global Bans:** ${gB}\n🚫 **Bans T${lobby.teamNumA}:** ${rA}\n🚫 **Bans T${lobby.teamNumB}:** ${rB}`)
+    .addFields({name:`🔵 TEAM ${lobby.teamNumA}${m.tag}`,value:lobby.teamA.map((id,i)=>`<@${id}> — ${champDisplay(lobby.picks.A[i]??"?")}`).join("\n"),inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM ${lobby.teamNumB}${m.tag}`,value:lobby.teamB.map((id,i)=>`<@${id}> — ${champDisplay(lobby.picks.B[i]??"?")}`).join("\n"),inline:true})
+    .setFooter({text:"Place your bets before they close!"});
+  const guild=lobby.channel.guild;
+  let betCh=lobby.channel;
+  if(lobby.isPro){const bp=guild.channels.cache.find(c=>c.name==="bet-pro"&&c.isTextBased());if(bp)betCh=bp;}
+  await betCh.send({embeds:[recapEmbed]}).catch(()=>{});
+  // Close bets after 4m30
+  lobby.betTimeout=setTimeout(async()=>{if(lobby.betsClosed)return;lobby.betsClosed=true;
+    if(lobby.betMsg){const LL=`${lobby.isPro?"P":"L"}${lobby.lobbyId}_`;const cr=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(LL+"betA").setLabel("🔵 Bets closed").setStyle(ButtonStyle.Primary).setDisabled(true),new ButtonBuilder().setCustomId(LL+"betB").setLabel("🔴 Bets closed").setStyle(ButtonStyle.Danger).setDisabled(true));await lobby.betMsg.edit({components:[cr]}).catch(()=>{});}
+    await betCh.send(`🎰 **${lobby.isPro?"Pro ":""}Lobby #${lobby.lobbyId}** — Bets are now closed!`).catch(()=>{});
+  },270_000);
 }
 
 // ─── LOBBY CREATION ──────────────────────────────────────────────────
@@ -407,7 +427,29 @@ async function startLobby(channel,lobbyId,isPro=false){
     const missing=lobby.expected.filter(id=>!inV.includes(id)),present=lobby.expected.filter(id=>inV.includes(id));
     const toR=present.filter(id=>!q.includes(id));if(toR.length>0){if(isPro)proQueue=[...toR,...proQueue];else queue=[...toR,...queue];for(const id of toR)await addRole(guild,id,inQueueRole);}
     for(const id of missing)await removeRole(guild,id,inQueueRole);
-    await channel.send(`⌛ **${isPro?"Pro ":""}Lobby #${lobbyId}** expired. Missing: ${missing.map(id=>`<@${id}>`).join(", ")}${present.length>0?`\n${present.map(id=>`<@${id}>`).join(", ")} have been re-added to the queue.`:""}`).catch(()=>{});
+    // AFK tracking (pro only)
+    let afkPenaltyText="";
+    if(isPro&&missing.length>0){
+      const now=Date.now(),weekAgo=now-7*864e5;
+      for(const id of missing){
+        ensureProActivity(id);
+        // Remove AFKs older than 7 days
+        proActivity[id].afks=(proActivity[id].afks||[]).filter(ts=>ts>weekAgo);
+        proActivity[id].afks.push(now);
+        const afkCount=proActivity[id].afks.length;
+        if(afkCount>2){
+          // Apply -6 ELO penalty
+          ensureProPlayer(id);
+          proStats[id].elo=Math.max(100,proStats[id].elo-6);
+          proStats[id].mmr=Math.max(100,proStats[id].mmr-6);
+          afkPenaltyText+=`\n⚠️ <@${id}> AFK #${afkCount} this week → **-6 Pro ELO**`;
+        }else{
+          afkPenaltyText+=`\n⚠️ <@${id}> AFK #${afkCount}/2 this week (free, no penalty)`;
+        }
+      }
+      await saveProActivity();await saveProStatsNow();await updateProLadder();
+    }
+    await channel.send(`⌛ **${isPro?"Pro ":""}Lobby #${lobbyId}** expired. Missing: ${missing.map(id=>`<@${id}>`).join(", ")}${present.length>0?`\n${present.map(id=>`<@${id}>`).join(", ")} have been re-added to the queue.`:""}${afkPenaltyText}`).catch(()=>{});
     await cleanupLobby(lobby);
   },LOBBY_TIMEOUT*1000);
 }
@@ -454,15 +496,20 @@ async function startMatch(lobby){
   for(const id of A){const mb=await guild.members.fetch(id).catch(()=>null);if(mb&&lvId&&mb.voice.channelId===lvId)await mb.voice.setChannel(lobby.voiceA).catch(()=>{});}
   for(const id of B){const mb=await guild.members.fetch(id).catch(()=>null);if(mb&&lvId&&mb.voice.channelId===lvId)await mb.voice.setChannel(lobby.voiceB).catch(()=>{});}
   if(lobby.lobbyVoice){await lobby.lobbyVoice.delete().catch(()=>{});lobby.lobbyVoice=null;}
-  lobby.phase="draft";lobby.map=MAPS[Math.floor(Math.random()*MAPS.length)];
+  lobby.phase="draft";lobby.map=pickMap(lobby.isPro);
   lobby.announceMsg=await lobby.channel.send({embeds:[new EmbedBuilder().setTitle(`⚔️  ${lobby.isPro?"Pro ":""}Lobby #${lobby.lobbyId} — Match Starting!`).setColor(m.resultColor).setDescription(`🗺️ **Map: ${lobby.map}**\n\n**🔵 Team ${lobby.teamNumA}${m.tag}** — Captain <@${lobby.captainA}>\n${A.map(id=>`<@${id}>`).join("  ·  ")}\n\n**🔴 Team ${lobby.teamNumB}${m.tag}** — Captain <@${lobby.captainB}>\n${B.map(id=>`<@${id}>`).join("  ·  ")}\n\n*Draft is live in <#${lobby.draftChannel.id}>!*`)]}).catch(()=>null);
   await lobby.chatA.send(`🔵 **Team ${lobby.teamNumA}${m.tag} — Private Chat**\nDiscuss your ban/pick strategy here.`).catch(()=>{});
   await lobby.chatB.send(`🔴 **Team ${lobby.teamNumB}${m.tag} — Private Chat**\nDiscuss your ban/pick strategy here.`).catch(()=>{});
-  // Bet message (normal only)
-  if(!lobby.isPro){const L=`L${lobby.lobbyId}_`;
-    const betEmbed=new EmbedBuilder().setTitle(`🎰  Lobby #${lobby.lobbyId} — Bets are open!`).setColor(0xF1C40F)
-      .setDescription(`🔵 **Team ${lobby.teamNumA}:** ${A.map(id=>`<@${id}>`).join(", ")}\n🔴 **Team ${lobby.teamNumB}:** ${B.map(id=>`<@${id}>`).join(", ")}\n\n*Place your bet! +1 ELO if right, -1 if wrong.\nBets close 4min30 after draft ends.*`);
-    lobby.betMsg=await lobby.channel.send({embeds:[betEmbed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(L+"betA").setLabel(`🔵 Bet Team ${lobby.teamNumA}`).setStyle(ButtonStyle.Primary),new ButtonBuilder().setCustomId(L+"betB").setLabel(`🔴 Bet Team ${lobby.teamNumB}`).setStyle(ButtonStyle.Danger))]}).catch(()=>null);
+  // Bet message — normal in queue channel, pro in bet-pro channel
+  const L=`${lobby.isPro?"P":"L"}${lobby.lobbyId}_`;
+  const betEmbed=new EmbedBuilder().setTitle(`🎰  ${lobby.isPro?"Pro ":""}Lobby #${lobby.lobbyId} — Bets are open!`).setColor(0xF1C40F)
+    .setDescription(`🔵 **Team ${lobby.teamNumA}${m.tag}:** ${A.map(id=>`<@${id}>`).join(", ")}\n🔴 **Team ${lobby.teamNumB}${m.tag}:** ${B.map(id=>`<@${id}>`).join(", ")}\n\n*Place your bet! +1 ELO if right, -1 if wrong.\nBets close 4min30 after draft ends.*`);
+  const betRow=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(L+"betA").setLabel(`🔵 Bet Team ${lobby.teamNumA}`).setStyle(ButtonStyle.Primary),new ButtonBuilder().setCustomId(L+"betB").setLabel(`🔴 Bet Team ${lobby.teamNumB}`).setStyle(ButtonStyle.Danger));
+  if(lobby.isPro){
+    const betProCh=guild.channels.cache.find(c=>c.name==="bet-pro"&&c.isTextBased());
+    if(betProCh)lobby.betMsg=await betProCh.send({embeds:[betEmbed],components:[betRow]}).catch(()=>null);
+  }else{
+    lobby.betMsg=await lobby.channel.send({embeds:[betEmbed],components:[betRow]}).catch(()=>null);
   }
   await startDraftStep(lobby);
 }
@@ -482,24 +529,58 @@ async function finishMatch(lobby,winner){
     if(st[id].elo>st[id].peakElo)st[id].peakElo=st[id].elo;
     if(isUpset)st[id].clutchWins=(st[id].clutchWins||0)+1;
   });
-  losers.forEach(id=>{ens(id);const r=calculateElo(st[id].elo,avgW,false);changes[id]=r.change;
-    st[id].elo=Math.max(100,st[id].elo+r.change);st[id].mmr=Math.max(100,st[id].mmr+r.change);
-    st[id].losses++;st[id].games++;st[id].currentStreak=0;
+  // Check if any loser is in placement (pro only)
+  const hasPlacement = lobby.isPro && losers.some(id => placementPlayers.has(id));
+  losers.forEach(id=>{ens(id);const r=calculateElo(st[id].elo,avgW,false);
+    if(hasPlacement && !placementPlayers.has(id)){
+      // Teammate of placement player: 0 ELO loss
+      changes[id]=0;st[id].losses++;st[id].games++;st[id].currentStreak=0;
+    }else{
+      // Normal loss (or placement player himself)
+      changes[id]=r.change;
+      st[id].elo=Math.max(100,st[id].elo+r.change);st[id].mmr=Math.max(100,st[id].mmr+r.change);
+      st[id].losses++;st[id].games++;st[id].currentStreak=0;
+    }
   });
-  // Bets (normal only)
+  // Update pro activity (reset decay timer)
+  if(lobby.isPro){
+    for(const id of [...winners,...losers]){
+      ensureProActivity(id);
+      proActivity[id].lastGame=Date.now();
+      proActivity[id].decayCount=0;
+    }
+    await saveProActivity();
+  }
+  // Bets (now supports both normal and pro) — bet winners/losers affect the match's ELO pool
   const betW=lobby.bets[winner],betL=lobby.bets[winner==="A"?"B":"A"],betC={};
-  if(!lobby.isPro){
-    for(const id of betW){ensurePlayer(id);stats[id].elo=Math.min(9999,stats[id].elo+1);stats[id].mmr++;stats[id].betWins=(stats[id].betWins||0)+1;stats[id].betStreak=(stats[id].betStreak||0)+1;if(stats[id].betStreak>(stats[id].bestBetStreak||0))stats[id].bestBetStreak=stats[id].betStreak;stats[id].betScore=(stats[id].betScore||0)+1;betC[id]=+1;}
-    for(const id of betL){ensurePlayer(id);stats[id].elo=Math.max(100,stats[id].elo-1);stats[id].mmr=Math.max(100,stats[id].mmr-1);stats[id].betLosses=(stats[id].betLosses||0)+1;stats[id].betStreak=0;stats[id].betScore=(stats[id].betScore||0)-1;betC[id]=-1;}
+  for(const id of betW){
+    ensurePlayer(id);
+    stats[id].betWins=(stats[id].betWins||0)+1;
+    stats[id].betStreak=(stats[id].betStreak||0)+1;
+    if(stats[id].betStreak>(stats[id].bestBetStreak||0))stats[id].bestBetStreak=stats[id].betStreak;
+    stats[id].betScore=(stats[id].betScore||0)+1;
+    // ELO gain goes to the queue mode where the match happened
+    if(lobby.isPro){ensureProPlayer(id);proStats[id].elo=Math.min(9999,proStats[id].elo+1);proStats[id].mmr++;}
+    else{stats[id].elo=Math.min(9999,stats[id].elo+1);stats[id].mmr++;}
+    betC[id]=+1;
+  }
+  for(const id of betL){
+    ensurePlayer(id);
+    stats[id].betLosses=(stats[id].betLosses||0)+1;
+    stats[id].betStreak=0;
+    stats[id].betScore=(stats[id].betScore||0)-1;
+    if(lobby.isPro){ensureProPlayer(id);proStats[id].elo=Math.max(100,proStats[id].elo-1);proStats[id].mmr=Math.max(100,proStats[id].mmr-1);}
+    else{stats[id].elo=Math.max(100,stats[id].elo-1);stats[id].mmr=Math.max(100,stats[id].mmr-1);}
+    betC[id]=-1;
   }
   m.season.matchCount++;await m.save();await m.saveSeas();
-  if(!lobby.isPro){await saveStatsNow();}// Save normal stats for bets too
+  await saveStatsNow();// Save normal stats for bet tracking
   // History
   const hist=m.history;hist.push({timestamp:Date.now(),lobbyId:lobby.lobbyId,teamA:[...lobby.teamA],teamB:[...lobby.teamB],picksA:[...lobby.picks.A],picksB:[...lobby.picks.B],bansA:[...lobby.bans.A],bansB:[...lobby.bans.B],globalBans:[...lobby.globalBans],winner,changes:{...changes},map:lobby.map});
   await m.saveHist();
   // Result embed
   let betText="";
-  if(!lobby.isPro&&(betW.length>0||betL.length>0)){betText="\n\n**🎰 Bets**\n";if(betW.length>0)betText+=betW.map(id=>`<@${id}> **+1** ✅`).join("\n")+"\n";if(betL.length>0)betText+=betL.map(id=>`<@${id}> **-1** ❌`).join("\n");}
+  if(betW.length>0||betL.length>0){betText="\n\n**🎰 Bets**\n";if(betW.length>0)betText+=betW.map(id=>`<@${id}> **+1** ✅`).join("\n")+"\n";if(betL.length>0)betText+=betL.map(id=>`<@${id}> **-1** ❌`).join("\n");}
   const resultEmbed=new EmbedBuilder().setTitle(`🏆  ${winLabel} Wins! — ${lobby.isPro?"Pro ":""}Lobby #${lobby.lobbyId}`).setColor(winner==="A"?0x3498DB:0xE74C3C)
     .setDescription(`🗺️ **Map:** ${lobby.map}\n\n**🥇 Winners**\n${winners.map(id=>`<@${id}>  **${changes[id]>=0?"+":""}${changes[id]}**  \`${st[id].elo} ELO\``).join("\n")}\n\n**💀 Losers**\n${losers.map(id=>`<@${id}>  **${changes[id]>=0?"+":""}${changes[id]}**  \`${st[id].elo} ELO\``).join("\n")}${betText}`).setTimestamp();
   if(lobby.boardMsg)await lobby.boardMsg.delete().catch(()=>{});
@@ -601,6 +682,26 @@ client.on("messageCreate",async msg=>{try{
     await msg.channel.send(`🔨 <@${u.id}> banned from matchmaking.`);return;}
   if(content.startsWith("!elounban")){if(!ADMIN_IDS.includes(msg.author.id))return;const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!elounban @player`");bannedPlayers.delete(u.id);await saveBanned();await msg.channel.send(`✅ <@${u.id}> unbanned.`);return;}
 
+  // ── !placement / !unplacement (admin + Staff, pro only) ──
+  if(content.startsWith("!placement")&&!content.startsWith("!unplacement")){
+    const isAllowed=ADMIN_IDS.includes(msg.author.id)||msg.member?.roles.cache.some(r=>r.name==="Staff");
+    if(!isAllowed)return msg.reply("❌ You need Admin or Staff role.");
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!placement @player`");
+    const mb=await msg.guild.members.fetch(u.id).catch(()=>null);
+    if(!mb||!mb.roles.cache.some(r=>r.name==="Pro"))return msg.reply("❌ This player doesn't have the Pro role.");
+    if(placementPlayers.has(u.id))return msg.reply("❌ This player is already in placement.");
+    placementPlayers.add(u.id);await savePlacement();
+    await msg.channel.send(`📋 <@${u.id}> is now in **placement mode** (Pro). Teammates won't lose ELO if they lose.`);return;
+  }
+  if(content.startsWith("!unplacement")){
+    const isAllowed=ADMIN_IDS.includes(msg.author.id)||msg.member?.roles.cache.some(r=>r.name==="Staff");
+    if(!isAllowed)return msg.reply("❌ You need Admin or Staff role.");
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!unplacement @player`");
+    if(!placementPlayers.has(u.id))return msg.reply("❌ This player is not in placement.");
+    placementPlayers.delete(u.id);await savePlacement();
+    await msg.channel.send(`✅ <@${u.id}> is no longer in placement mode.`);return;
+  }
+
   // ── !captain ──
   if(content==="!captain"){const lobby=findLobbyByDraftChannel(msg.channel.id);if(!lobby||!lobby.active||lobby.phase!=="draft")return;const uid=msg.author.id;
     if(lobby.teamA.includes(uid)){lobby.captainA=uid;await msg.channel.send(`👑 <@${uid}> is now captain of **Team ${lobby.teamNumA}${lobby.isPro?" Pro":""}**!`);pushBoard(lobby);}
@@ -610,7 +711,7 @@ client.on("messageCreate",async msg=>{try{
   // ── !help ──
   if(content==="!help"){await msg.channel.send({embeds:[new EmbedBuilder().setTitle("📖  LobbyELO — Commands").setColor(0x5865F2).setDescription(
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!stats pro` — Your stats\n`!stats @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n\n"+
-    "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`"
+    "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`"
   )]});return;}
 
   // ── !stats ──
@@ -783,15 +884,16 @@ client.on("interactionCreate",async interaction=>{try{
   if(!lobby)return interaction.reply({content:"❌ Lobby no longer exists.",ephemeral:true});
   const rest=cid.substring(3);
 
-  // ── Bet (normal only) ──
-  if(!isPro&&(rest==="betA"||rest==="betB")){
+  // ── Bet (normal + pro) ──
+  if(rest==="betA"||rest==="betB"){
     const uid=interaction.user.id;
     if([...lobby.teamA,...lobby.teamB].includes(uid))return interaction.reply({content:"❌ Can't bet on your own match.",ephemeral:true});
     if(lobby.betsClosed)return interaction.reply({content:"❌ Bets closed.",ephemeral:true});
     if(lobby.bets.A.includes(uid)||lobby.bets.B.includes(uid))return interaction.reply({content:"❌ Already bet.",ephemeral:true});
     const side=rest==="betA"?"A":"B";lobby.bets[side].push(uid);ensurePlayer(uid);
     await interaction.reply({content:`✅ You bet on **${teamLabel(lobby,side)}**.`,ephemeral:true});
-    await lobby.channel.send(`🎰 <@${uid}> bet on **${teamLabel(lobby,side)}**!`).catch(()=>{});return;
+    const announceCh=lobby.isPro?(interaction.guild.channels.cache.find(c=>c.name==="bet-pro"&&c.isTextBased())||lobby.channel):lobby.channel;
+    await announceCh.send(`🎰 <@${uid}> bet on **${teamLabel(lobby,side)}**!`).catch(()=>{});return;
   }
 
   // ── Cancel vote ──
@@ -873,6 +975,43 @@ client.once("ready",async()=>{
         await genCh.send({embeds:[new EmbedBuilder().setTitle(`📅  ${isPro?"Pro ":""}Weekly Recap`).setColor(0xF1C40F).setDescription(desc).setTimestamp()]}).catch(()=>{});
       }
     }
+  },3600_000);
+
+  // ── Inactivity decay for top 3 Pro players (check every hour, apply per 24h cycles after 2.5d) ──
+  setInterval(async()=>{
+    const top3=Object.entries(proStats).filter(([,s])=>s.games>0).sort(([,a],[,b])=>b.elo-a.elo).slice(0,3).map(([id])=>id);
+    if(top3.length===0)return;
+    const now=Date.now();
+    const DECAY_START=2.5*864e5;// 2.5 days
+    const DECAY_INTERVAL=864e5;// 24 hours after first
+    let anyChange=false;
+    for(const id of top3){
+      ensureProActivity(id);
+      const inactive=now-(proActivity[id].lastGame||now);
+      if(inactive<DECAY_START)continue;
+      // Compute how many decay ticks should have been applied
+      const ticksDeserved=1+Math.floor((inactive-DECAY_START)/DECAY_INTERVAL);// 1 at 2.5d, 2 at 3.5d, 3 at 4.5d...
+      const ticksApplied=proActivity[id].decayCount||0;
+      if(ticksDeserved>ticksApplied){
+        const newTicks=ticksDeserved-ticksApplied;
+        for(let t=0;t<newTicks;t++){
+          const tickNum=ticksApplied+t+1;
+          // Day 1 = -10, Day 2+ = -20
+          const penalty=tickNum===1?10:20;
+          ensureProPlayer(id);
+          proStats[id].elo=Math.max(100,proStats[id].elo-penalty);
+          proStats[id].mmr=Math.max(100,proStats[id].mmr-penalty);
+          proActivity[id].decayCount=tickNum;
+          anyChange=true;
+          // Announce in pro general chat
+          for(const[,guild]of client.guilds.cache){
+            const genCh=guild.channels.cache.find(c=>c.name==="general-pro-chat"&&c.isTextBased());
+            if(genCh)await genCh.send({embeds:[new EmbedBuilder().setTitle("⏳  Inactivity Decay").setColor(0xE67E22).setDescription(`<@${id}> hasn't played in **${Math.floor(inactive/864e5)} days**!\nTop 3 Pro penalty applied: **-${penalty} ELO**`)]}).catch(()=>{});
+          }
+        }
+      }
+    }
+    if(anyChange){await saveProActivity();await saveProStatsNow();await updateProLadder();}
   },3600_000);
 });
 
