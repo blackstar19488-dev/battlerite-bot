@@ -152,6 +152,52 @@ async function removeRole(g,u,r){if(!r||!g)return;const m=await g.members.fetch(
 let queue=[],proQueue=[],_queueLock=false,_proQueueLock=false;
 const proQueueJoinTime={}; // {playerId: timestamp} for 1h auto-leave
 
+// ─── DODGE SYSTEM (Pro only) ─────────────────────────────────────────
+const DODGE_PROTECTED_ID="110378344192675840"; // Gerninja - cannot be dodged
+const dodgeFile=p("dodge.json");
+let dodges=fs.existsSync(dodgeFile)?JSON.parse(fs.readFileSync(dodgeFile)):{}; // {userId: [dodgedId1, dodgedId2, ...]}
+async function saveDodges(){try{await fs.promises.writeFile(dodgeFile,JSON.stringify(dodges,null,2));}catch(e){log("ERROR","saveDodges:",e);}}
+function getDodgeCount(playerId){
+  // How many users have dodged this player
+  let count=0;
+  for(const uid of Object.keys(dodges))if((dodges[uid]||[]).includes(playerId))count++;
+  return count;
+}
+function getAllDodgedInPro(){
+  // Returns set of playerIds who appear in proQueue and have at least 1 dodge against them
+  const result=new Set();
+  for(const id of proQueue)if(getDodgeCount(id)>0)result.add(id);
+  return result;
+}
+function findValidScrimGroup(){
+  // Find 6 players in proQueue where no one dodges another in the group
+  // Returns the array of 6 player IDs that can form a match, or null if impossible
+  if(proQueue.length<6)return null;
+  // Try to find any combination of 6 with no dodge conflicts
+  // Greedy: try adding from front, skip if conflict with already-selected
+  const tryGreedy=(startList)=>{
+    const selected=[];
+    for(const id of startList){
+      if(selected.length>=6)break;
+      let conflict=false;
+      for(const sel of selected){
+        if((dodges[id]||[]).includes(sel)||(dodges[sel]||[]).includes(id)){conflict=true;break;}
+      }
+      if(!conflict)selected.push(id);
+    }
+    return selected.length===6?selected:null;
+  };
+  // Try original order first
+  let result=tryGreedy(proQueue);
+  if(result)return result;
+  // Try non-dodged first (less conflicts likely)
+  const dodgedSet=getAllDodgedInPro();
+  const nonDodged=proQueue.filter(id=>!dodgedSet.has(id));
+  const dodged=proQueue.filter(id=>dodgedSet.has(id));
+  result=tryGreedy([...nonDodged,...dodged]);
+  return result;
+}
+
 // ─── SCRIM SYSTEM (dynamic lobbies) ──────────────────────────────────
 const RAY_ID="245671110744473600";
 const MAX_SCRIM_LOBBIES=5;
@@ -214,36 +260,67 @@ function tryStartLobby(channel,isPro){
   const slot=getFreeLobbySlot(lm);
   if(!slot)return;
 
-  // For pro: check if any placement player is in the first 6 → delay 15s
+  // For pro: check dodge conflicts AND placement priority
   if(isPro){
-    const first6=q.slice(0,6);
-    const placementsInSix=first6.filter(id=>placementPlayers.has(id));
-    if(placementsInSix.length>0){
-      // If there are enough non-placement players waiting (q.length >= 6 + placementsInSix), swap them out now
-      const nonPlacementAll=q.filter(id=>!placementPlayers.has(id));
-      if(nonPlacementAll.length>=6){
-        // Can start without placements — put placements at the back
-        const placementsToMove=first6.filter(id=>placementPlayers.has(id));
-        const newQ=q.filter(id=>!placementsToMove.includes(id));
-        newQ.push(...placementsToMove);
-        proQueue.length=0;proQueue.push(...newQ);
-        refreshQueue(channel,true).catch(()=>{});
-        startLobby(channel,slot,true).catch(e=>log("ERROR","startLobby:",e));
-        return;
+    // 1. Try to find a valid group of 6 with NO mutual dodge conflicts
+    const validGroup=findValidScrimGroup();
+    if(!validGroup){
+      // No valid group exists — wait for a new player to arrive
+      log("INFO","Pro queue: no valid group of 6 (dodge conflicts), waiting...");
+      return;
+    }
+
+    // 2. Apply placement priority within the valid group
+    const placementsInGroup=validGroup.filter(id=>placementPlayers.has(id));
+    if(placementsInGroup.length>0){
+      // Try to find a valid group of 6 NON-placement players first
+      const nonPlacementOnly=q.filter(id=>!placementPlayers.has(id));
+      if(nonPlacementOnly.length>=6){
+        // Try to form a valid non-placement group
+        const tryNonPlacement=()=>{
+          const sel=[];
+          for(const id of nonPlacementOnly){
+            if(sel.length>=6)break;
+            let conflict=false;
+            for(const s of sel)if((dodges[id]||[]).includes(s)||(dodges[s]||[]).includes(id)){conflict=true;break;}
+            if(!conflict)sel.push(id);
+          }
+          return sel.length===6?sel:null;
+        };
+        const npGroup=tryNonPlacement();
+        if(npGroup){
+          // Reorder queue: chosen 6 first, rest after (placements pushed to back)
+          const newQ=[...npGroup,...q.filter(id=>!npGroup.includes(id))];
+          proQueue.length=0;proQueue.push(...newQ);
+          refreshQueue(channel,true).catch(()=>{});
+          startLobby(channel,slot,true).catch(e=>log("ERROR","startLobby:",e));
+          return;
+        }
       }
       // Otherwise start 15s delay (if not already running)
       if(_proPlacementDelay)return;
-      channel.send(`⏳ **Lobby ready with ${placementsInSix.length} placement player(s)** — waiting 15 seconds for a non-placement player to join...`).catch(()=>{});
+      channel.send(`⏳ **Lobby ready with ${placementsInGroup.length} placement player(s)** — waiting 15 seconds for a non-placement player to join...`).catch(()=>{});
       _proPlacementDelay=setTimeout(async()=>{
         _proPlacementDelay=null;
-        // Start lobby after 15s with placement players still included
+        // Re-validate after delay
+        const validG=findValidScrimGroup();
+        if(!validG)return;
         const slot2=getFreeLobbySlot(proLobbies);
-        if(slot2&&proQueue.length>=6)startLobby(channel,slot2,true).catch(e=>log("ERROR","startLobby:",e));
+        if(!slot2)return;
+        // Reorder so validG is at the front
+        const newQ=[...validG,...proQueue.filter(id=>!validG.includes(id))];
+        proQueue.length=0;proQueue.push(...newQ);
+        startLobby(channel,slot2,true).catch(e=>log("ERROR","startLobby:",e));
       },15000);
       return;
     }
+    // No placements but valid group → reorder and start
+    const newQ=[...validGroup,...q.filter(id=>!validGroup.includes(id))];
+    proQueue.length=0;proQueue.push(...newQ);
+    startLobby(channel,slot,true).catch(e=>log("ERROR","startLobby:",e));
+    return;
   }
-  // Normal case: start immediately
+  // Normal case (non-pro): start immediately
   startLobby(channel,slot,isPro).catch(e=>log("ERROR","startLobby:",e));
 }
 function findLobbyByDraftChannel(chId){
@@ -429,10 +506,6 @@ function scrimHistoryBtns(lobby){
   const replayCount=(lobby.replays||[]).length;
   // Add Replay button (next slot) if under 5
   if(replayCount<5)row1.addComponents(new ButtonBuilder().setCustomId(`scrim_${lobby.id}_addreplay`).setLabel(`➕ Add Replay ${replayCount+1}`).setStyle(ButtonStyle.Primary));
-  // Watch Replay buttons for existing
-  for(let i=0;i<replayCount;i++){
-    if(row1.components.length<5)row1.addComponents(new ButtonBuilder().setCustomId(`scrim_${lobby.id}_watchreplay${i}`).setLabel(`📺 Watch Replay ${i+1}`).setStyle(ButtonStyle.Secondary));
-  }
   if(row1.components.length>0)rows.push(row1);
   // Upload draft button
   const row2=new ActionRowBuilder().addComponents(
@@ -447,18 +520,23 @@ function queueEmbed(isPro){
   const slot=getFreeLobbySlot(lm);
   const next=slot?`Lobby #${slot}${m.tag}`:null;
   const title=isPro?`⚔️🔥 PRO QUEUE — Battlerite 3v3${next?` (${next})`:""}`:`⚔️ Battlerite 3v3 — Queue${next?` (${next})`:""}`;
-  // Non-priority count: only pro, placement players don't count as priority
-  const hasPlacement=isPro&&q.some(id=>placementPlayers.has(id));
-  const totalSlots=hasPlacement?7:6;
+  // Calculate non-priority overflow: 6 + (number of placement players) + (number of dodged players)
+  const placementInQ=isPro?q.filter(id=>placementPlayers.has(id)).length:0;
+  const dodgedInQ=isPro?q.filter(id=>getDodgeCount(id)>0).length:0;
+  const totalSlots=6+placementInQ+dodgedInQ;
+  const hasNonPriority=placementInQ>0||dodgedInQ>0;
   let desc;
   if(!next)desc=`*⏳ All ${isPro?"pro ":""}lobbies are in progress. Please wait.*`;
   else if(q.length===0)desc=isPro?"*Queue is empty — click **Join** to enter!\nOnly players with the Pro role can queue.*":"*Queue is empty — click **Join** to enter!*";
   else desc=q.map((id,i)=>{
     const isPlace=isPro&&placementPlayers.has(id);
-    const name=isPlace?`🔴 **<@${id}> (non-priority)**`:`<@${id}>`;
+    const dCount=isPro?getDodgeCount(id):0;
+    let name=`<@${id}>`;
+    if(isPlace)name=`🔴 **<@${id}> (non-priority)**`;
+    else if(dCount>0)name=`🚫 **<@${id}> (dodged ${dCount}x)**`;
     return `**${i+1}.** ${name} — \`${(m.stats[id]?.elo??1000)} ELO\``;
   }).join("\n");
-  return new EmbedBuilder().setTitle(title).setColor(m.color).setDescription(desc).setFooter({text:`${q.length} / ${totalSlots} players${hasPlacement?" (placement in queue)":""}`});
+  return new EmbedBuilder().setTitle(title).setColor(m.color).setDescription(desc).setFooter({text:`${q.length} / ${totalSlots} players${hasNonPriority?" (non-priority players in queue)":""}`});
 }
 function queueBtns(isPro,disabled=false){
   const lm=isPro?proLobbies:lobbies;const blocked=allSlotsActive(lm);const pre=isPro?"pq_":"q_";
@@ -472,17 +550,44 @@ async function refreshQueue(channel,isPro,locked=false){
   for(const chId of Object.keys(msgs)){if(chId===channel.id)continue;const ch=client.channels.cache.get(chId);if(!ch){delete msgs[chId];continue;}msgs[chId]?.delete().catch(()=>{});delete msgs[chId];}
   const ex=msgs[channel.id];
   if(ex){
-    // Try to EDIT the existing message first (avoid creating duplicates)
     try{
       await ex.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
       return;
     }catch(e){
-      // If edit fails (message deleted), fall through to create a new one
       delete msgs[channel.id];
     }
   }
-  // Clean up any orphan queue messages in the channel
-  try{const recent=await channel.messages.fetch({limit:20});const old=recent.filter(m=>m.author.id===client.user.id&&m.embeds.length>0&&m.embeds[0].title?.includes("Queue"));for(const[,m]of old)await m.delete().catch(()=>{});}catch(e){}
+  // No existing message — find any orphan queue messages and try to edit
+  try{
+    const recent=await channel.messages.fetch({limit:30});
+    const old=recent.filter(m=>m.author.id===client.user.id&&m.embeds.length>0&&m.embeds[0].title?.includes("Queue"));
+    if(old.size>0){
+      // Delete all but newest, edit newest
+      const sorted=[...old.values()].sort((a,b)=>b.createdTimestamp-a.createdTimestamp);
+      const newest=sorted[0];
+      for(let i=1;i<sorted.length;i++)await sorted[i].delete().catch(()=>{});
+      try{
+        await newest.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
+        msgs[channel.id]=newest;
+        return;
+      }catch(e){await newest.delete().catch(()=>{});}
+    }
+  }catch(e){}
+  msgs[channel.id]=await channel.send({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
+}
+
+// Repush the queue message at the bottom of the channel (delete old, send new)
+async function repushQueue(channel,isPro,locked=false){
+  const msgs=isPro?proQueueMessages:queueMessages;
+  const ex=msgs[channel.id];
+  if(ex)await ex.delete().catch(()=>{});
+  delete msgs[channel.id];
+  // Also clean up other queue messages
+  try{
+    const recent=await channel.messages.fetch({limit:30});
+    const old=recent.filter(m=>m.author.id===client.user.id&&m.embeds.length>0&&m.embeds[0].title?.includes("Queue"));
+    for(const[,m]of old)await m.delete().catch(()=>{});
+  }catch(e){}
   msgs[channel.id]=await channel.send({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
 }
 
@@ -829,6 +934,16 @@ client.on("messageCreate",async msg=>{try{
   const isPro=content.endsWith(" pro");
   const base=isPro?content.slice(0,-4).trim():content;
 
+  // Repush queue messages to bottom when any user message arrives in queue channels
+  // This ensures the queue stays visible at the bottom of the channel
+  if(msg.channel.name==="queue-elb-pro"||msg.channel.name==="queue-lobby-elo"){
+    const isProCh=msg.channel.name==="queue-elb-pro";
+    // Only repush if there's an active queue message AND we're not handling a bot command that updates it anyway
+    setTimeout(async()=>{
+      try{const lm=isProCh?proLobbies:lobbies;await repushQueue(msg.channel,isProCh,allSlotsActive(lm));}catch(e){log("ERROR","auto-repush:",e);}
+    },1500);
+  }
+
   // ── !queue ──
   if(base==="!queue"){
     const lock=isPro?"_proQueueLock":"_queueLock";
@@ -904,6 +1019,37 @@ client.on("messageCreate",async msg=>{try{
     await msg.channel.send(`✅ <@${u.id}> is no longer in placement mode.`);return;
   }
 
+  // ── !dodge / !undodge / !mydodge (Pro only — any player) ──
+  if(content.startsWith("!dodge")&&!content.startsWith("!dodgeclear")){
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!dodge @player`");
+    if(u.id===DODGE_PROTECTED_ID)return msg.reply("❌ You cannot dodge this player.");
+    if(u.id===msg.author.id)return msg.reply("❌ You cannot dodge yourself.");
+    const uid=msg.author.id;
+    if(!dodges[uid])dodges[uid]=[];
+    if(dodges[uid].includes(u.id))return msg.reply(`❌ <@${u.id}> is already in your dodge list.`);
+    dodges[uid].push(u.id);await saveDodges();
+    await msg.reply(`🚫 <@${u.id}> has been added to your **dodge list** (Pro only). Matches won't pop with both of you in queue.`);
+    return;
+  }
+  if(content.startsWith("!undodge")){
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!undodge @player`");
+    const uid=msg.author.id;
+    if(!dodges[uid]||!dodges[uid].includes(u.id))return msg.reply("❌ This player is not in your dodge list.");
+    dodges[uid]=dodges[uid].filter(id=>id!==u.id);
+    if(dodges[uid].length===0)delete dodges[uid];
+    await saveDodges();
+    await msg.reply(`✅ <@${u.id}> removed from your dodge list.`);
+    return;
+  }
+  if(content==="!mydodge"){
+    const uid=msg.author.id;
+    const list=dodges[uid]||[];
+    if(list.length===0)return msg.reply({content:"📋 Your dodge list is empty.",allowedMentions:{parse:[]}});
+    const desc=list.map((id,i)=>`**${i+1}.** <@${id}>`).join("\n");
+    await msg.reply({embeds:[new EmbedBuilder().setTitle("🚫 Your Dodge List").setColor(0xE74C3C).setDescription(desc).setFooter({text:`${list.length} player(s) dodged`})],allowedMentions:{parse:[]}});
+    return;
+  }
+
   // ── !captain ──
   if(content==="!captain"){const lobby=findLobbyByDraftChannel(msg.channel.id);if(!lobby||!lobby.active||lobby.phase!=="draft")return;const uid=msg.author.id;
     if(lobby.teamA.includes(uid)){lobby.captainA=uid;await msg.channel.send(`👑 <@${uid}> is now captain of **Team ${lobby.teamNumA}${lobby.isPro?" Pro":""}**!`);pushBoard(lobby);}
@@ -912,19 +1058,63 @@ client.on("messageCreate",async msg=>{try{
 
   // ── !help ──
   if(content==="!help"){await msg.channel.send({embeds:[new EmbedBuilder().setTitle("📖  LobbyELO — Commands").setColor(0x5865F2).setDescription(
-    "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n\n"+
+    "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n`!command` — Buttons menu for all commands\n\n"+
+    "**Pro Dodge (anyone):**\n`!dodge @player` — Don't match with this player in Pro\n`!undodge @player` — Remove from dodge list\n`!mydodge` — Show your dodge list\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
-    "**Scrim (Ray + Admin + Lobby Admin):**\n`!scrim` — Show the scrim hub (create button)\n`!removescrim <id> @player` — Remove a player from a scrim\n`!cancelscrim <id>` — Cancel and delete a scrim\n`!draft <id>` (with image attached) — Upload a draft screenshot"
+    "**Scrim (Ray + Admin + Lobby Admin):**\n`!scrim` — Create a new scrim lobby\n`!removescrim <id> @player` — Remove a player from a scrim\n`!cancelscrim <id>` — Cancel and delete a scrim\n`!draft <id>` (with image attached) — Upload a draft screenshot"
   )]});return;}
+
+  // ── !command — buttons menu (ephemeral) ──
+  if(content==="!command"){
+    const embed=new EmbedBuilder().setTitle("🎮  Quick Commands").setColor(0x5865F2)
+      .setDescription("Click a button below to run the command. For commands needing a player, a popup will appear.");
+    const row1=new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("cmd_queue").setLabel("!queue").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("cmd_queuepro").setLabel("!queue pro").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("cmd_stats").setLabel("!stats").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("cmd_statspro").setLabel("!statspro").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("cmd_history").setLabel("!history").setStyle(ButtonStyle.Secondary)
+    );
+    const row2=new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("cmd_historypro").setLabel("!history pro").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("cmd_season").setLabel("!season").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("cmd_seasonpro").setLabel("!season pro").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("cmd_mmr").setLabel("!MMR (you)").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("cmd_statsplayer").setLabel("!stats @player").setStyle(ButtonStyle.Success)
+    );
+    const row3=new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("cmd_statsproplayer").setLabel("!statspro @player").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("cmd_mmrplayer").setLabel("!MMR @player").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("cmd_relation").setLabel("!relation @p1 @p2").setStyle(ButtonStyle.Secondary)
+    );
+    await msg.reply({embeds:[embed],components:[row1,row2,row3]});
+    return;
+  }
 
   // ── !scrim (Ray + Admin) — shows create scrim hub if no active lobbies ──
   if(content==="!scrim"){
     if(msg.author.id!==RAY_ID&&!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Only Ray or admins can use this.");
     const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
     if(!ch)return msg.reply("❌ Channel #ray-scrim-queue not found.");
-    if(activeScrims().length>0){await msg.reply("ℹ️ There are already active scrim lobbies. Use the existing ones or wait for them to be archived.");return;}
+    if(activeScrims().length>=MAX_SCRIM_LOBBIES)return msg.reply(`❌ Max ${MAX_SCRIM_LOBBIES} active scrim lobbies reached.`);
+    // Create the first lobby with the user (Ray or admin) as creator
+    const uid=msg.author.id;
+    const lobbyId=generateScrimId();
+    const role=await msg.guild.roles.create({name:`Admin Lobby #${lobbyId}`,mentionable:false,reason:"Scrim lobby admin"}).catch(()=>null);
+    const member=await msg.guild.members.fetch(uid).catch(()=>null);
+    if(role&&member)await member.roles.add(role).catch(()=>{});
+    const newLobby={
+      id:lobbyId,creatorId:uid,roleId:role?.id??null,dateStr:null,timeStr:null,
+      teamA:[],teamB:[],confirmed:[],declined:[],
+      validationSent:false,validationPingedAt:null,pendingPings:{},
+      messageId:null,status:"open",replays:[],drafts:[],historyMsgId:null,createdAt:Date.now()
+    };
+    scrim.lobbies.push(newLobby);
+    const lobbyMsg=await ch.send({embeds:[scrimLobbyEmbed(newLobby)],components:scrimLobbyBtns(newLobby)}).catch(()=>null);
+    if(lobbyMsg)newLobby.messageId=lobbyMsg.id;
+    await saveScrim();
     await refreshCreateScrimBtn(ch);
-    await msg.reply("✅ Scrim hub refreshed.");
+    await msg.reply(`✅ Scrim **#${lobbyId}** created in <#${ch.id}>! You're the lobby admin.`);
     return;
   }
 
@@ -1180,10 +1370,118 @@ client.on("interactionCreate",async interaction=>{try{
       await interaction.reply({content:`✅ Replay #${lobby.replays.length} added!`,ephemeral:true});
       return;
     }
+    // !command modals
+    if(cid.startsWith("cmd_modal_")){
+      const action=cid.replace("cmd_modal_","");
+      // Helper to resolve a player input (mention, ID, or username) to a discord ID
+      const resolvePlayer=async(input)=>{
+        input=input.trim().replace(/[<@!>]/g,"");
+        if(/^\d{17,20}$/.test(input))return input;
+        // Try to find member by username/displayName
+        const members=await interaction.guild.members.fetch().catch(()=>null);
+        if(!members)return null;
+        const found=members.find(m=>m.user.username.toLowerCase()===input.toLowerCase()||m.displayName.toLowerCase()===input.toLowerCase());
+        return found?found.id:null;
+      };
+      if(action==="statsplayer"||action==="statsproplayer"){
+        const isP=action==="statsproplayer";
+        const inp=interaction.fields.getTextInputValue("player_id");
+        const pid=await resolvePlayer(inp);
+        if(!pid)return interaction.reply({content:`❌ Player not found: ${inp}`,ephemeral:true});
+        const m=M(isP),st=m.stats;m.ensure(pid);const s=st[pid],total=s.wins+s.losses;
+        const ranked=Object.entries(st).filter(([,x])=>x.games>0).sort(([,a],[,b])=>b.elo-a.elo);
+        const rank=ranked.findIndex(([id])=>id===pid)+1;
+        const fields=[{name:"ELO",value:`\`${s.elo}\``,inline:true},{name:"Peak ELO",value:`\`${s.peakElo||s.elo}\``,inline:true},{name:"Rank",value:`\`#${rank>0?rank:"—"} / ${ranked.length}\``,inline:true},{name:"Win Rate",value:`\`${total===0?0:Math.round(s.wins/total*100)}%\``,inline:true},{name:"Wins",value:`\`${s.wins}\``,inline:true},{name:"Losses",value:`\`${s.losses}\``,inline:true}];
+        await interaction.reply({embeds:[new EmbedBuilder().setTitle(`📊 ${isP?"Pro ":""}Stats — <@${pid}>`).setColor(isP?0xDAA520:0x57F287).setDescription(`<@${pid}>`).addFields(fields)],ephemeral:true,allowedMentions:{parse:[]}});return;
+      }
+      if(action==="mmrplayer"){
+        const inp=interaction.fields.getTextInputValue("player_id");
+        const pid=await resolvePlayer(inp);
+        if(!pid)return interaction.reply({content:`❌ Player not found: ${inp}`,ephemeral:true});
+        ensurePlayer(pid);
+        await interaction.reply({embeds:[new EmbedBuilder().setTitle("🏆 Lifetime MMR").setColor(0x9B59B6).setDescription(`<@${pid}> — \`${stats[pid].mmr} MMR\``)],ephemeral:true,allowedMentions:{parse:[]}});return;
+      }
+      if(action==="relation"){
+        const i1=interaction.fields.getTextInputValue("p1");
+        const i2=interaction.fields.getTextInputValue("p2");
+        const p1=await resolvePlayer(i1),p2=await resolvePlayer(i2);
+        if(!p1||!p2)return interaction.reply({content:`❌ Player(s) not found.`,ephemeral:true});
+        // Compute h2h from match history
+        let p1Wins=0,p2Wins=0;
+        for(const x of matchHistory){
+          const p1A=x.teamA.includes(p1),p1B=x.teamB.includes(p1),p2A=x.teamA.includes(p2),p2B=x.teamB.includes(p2);
+          if((p1A&&p2B)||(p1B&&p2A)){
+            const p1Won=(x.winner==="A"&&p1A)||(x.winner==="B"&&p1B);
+            if(p1Won)p1Wins++;else p2Wins++;
+          }
+        }
+        await interaction.reply({embeds:[new EmbedBuilder().setTitle("⚔️ Head-to-Head").setColor(0xE74C3C).setDescription(`<@${p1}> **${p1Wins}** — **${p2Wins}** <@${p2}>`)],ephemeral:true,allowedMentions:{parse:[]}});return;
+      }
+      return;
+    }
     return;
   }
 
   if(!interaction.isButton())return;
+
+  // ── !command quick-action buttons ──
+  if(cid.startsWith("cmd_")){
+    const action=cid.replace("cmd_","");
+    // Direct actions (no argument needed)
+    if(action==="queue"){await interaction.reply({content:"💡 To join the queue, type `!queue` or click the **Join** button in #queue-lobby-elo.",ephemeral:true});return;}
+    if(action==="queuepro"){await interaction.reply({content:"💡 To join the Pro queue, type `!queue pro` or click the **Join** button in #queue-elb-pro.",ephemeral:true});return;}
+    if(action==="stats"){
+      // Run !stats for self
+      const m=M(false),uid=interaction.user.id,st=m.stats;m.ensure(uid);const s=st[uid],total=s.wins+s.losses;
+      const ranked=Object.entries(st).filter(([,x])=>x.games>0).sort(([,a],[,b])=>b.elo-a.elo);
+      const rank=ranked.findIndex(([id])=>id===uid)+1;
+      const fields=[{name:"ELO",value:`\`${s.elo}\``,inline:true},{name:"Peak ELO",value:`\`${s.peakElo||s.elo}\``,inline:true},{name:"Rank",value:`\`#${rank>0?rank:"—"} / ${ranked.length}\``,inline:true},{name:"Win Rate",value:`\`${total===0?0:Math.round(s.wins/total*100)}%\``,inline:true},{name:"Wins",value:`\`${s.wins}\``,inline:true},{name:"Losses",value:`\`${s.losses}\``,inline:true}];
+      await interaction.reply({embeds:[new EmbedBuilder().setTitle(`📊 Your Stats`).setColor(0x57F287).addFields(fields)],ephemeral:true});return;
+    }
+    if(action==="statspro"){
+      const m=M(true),uid=interaction.user.id,st=m.stats;m.ensure(uid);const s=st[uid],total=s.wins+s.losses;
+      const ranked=Object.entries(st).filter(([,x])=>x.games>0).sort(([,a],[,b])=>b.elo-a.elo);
+      const rank=ranked.findIndex(([id])=>id===uid)+1;
+      const fields=[{name:"ELO",value:`\`${s.elo}\``,inline:true},{name:"Peak ELO",value:`\`${s.peakElo||s.elo}\``,inline:true},{name:"Rank",value:`\`#${rank>0?rank:"—"} / ${ranked.length}\``,inline:true},{name:"Win Rate",value:`\`${total===0?0:Math.round(s.wins/total*100)}%\``,inline:true},{name:"Wins",value:`\`${s.wins}\``,inline:true},{name:"Losses",value:`\`${s.losses}\``,inline:true}];
+      await interaction.reply({embeds:[new EmbedBuilder().setTitle(`📊 Your Pro Stats`).setColor(0xDAA520).addFields(fields)],ephemeral:true});return;
+    }
+    if(action==="history"||action==="historypro"){
+      const isP=action==="historypro";
+      const m=M(isP),tid=interaction.user.id;
+      const pm=m.history.filter(x=>[...x.teamA,...x.teamB].includes(tid)).slice(-5);
+      if(!pm.length)return interaction.reply({content:"No history.",ephemeral:true});
+      const desc=pm.reverse().map(x=>{const w=(x.winner==="A"&&x.teamA.includes(tid))||(x.winner==="B"&&x.teamB.includes(tid));const c=x.changes?.[tid]??0;return `${w?"🟢":"🔴"} **${w?"Win":"Loss"}** — ${c>=0?"+":""}${c} ELO • ${x.map||"?"}`;}).join("\n");
+      await interaction.reply({embeds:[new EmbedBuilder().setTitle(`📜 Your last 5 ${isP?"Pro ":""}matches`).setColor(0x5865F2).setDescription(desc)],ephemeral:true});return;
+    }
+    if(action==="season"||action==="seasonpro"){
+      const isP=action==="seasonpro";
+      const m=M(isP);
+      const startDate=new Date(m.season.startDate);
+      const days=Math.floor((Date.now()-startDate.getTime())/864e5);
+      await interaction.reply({embeds:[new EmbedBuilder().setTitle(`📅 ${isP?"Pro ":""}Season Info`).setColor(0xF1C40F).setDescription(`**Started:** ${startDate.toLocaleDateString()}\n**Days running:** ${days}\n**Matches played:** ${m.season.matchCount}`)],ephemeral:true});return;
+    }
+    if(action==="mmr"){
+      const uid=interaction.user.id;ensurePlayer(uid);
+      await interaction.reply({embeds:[new EmbedBuilder().setTitle("🏆 Your Lifetime MMR").setColor(0x9B59B6).setDescription(`<@${uid}> — \`${stats[uid].mmr} MMR\``)],ephemeral:true});return;
+    }
+    // Modal-based actions
+    if(action==="statsplayer"||action==="statsproplayer"||action==="mmrplayer"){
+      const isStatsPro=action==="statsproplayer";
+      const isMMR=action==="mmrplayer";
+      const modal=new ModalBuilder().setCustomId(`cmd_modal_${action}`).setTitle(isMMR?"Show MMR of player":"Show stats of player");
+      const input=new TextInputBuilder().setCustomId("player_id").setLabel("Discord username, ID, or @mention").setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder("e.g. @PlayerName or 123456789012345678");
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      await interaction.showModal(modal);return;
+    }
+    if(action==="relation"){
+      const modal=new ModalBuilder().setCustomId("cmd_modal_relation").setTitle("Head-to-head between two players");
+      const i1=new TextInputBuilder().setCustomId("p1").setLabel("Player 1 (username, ID, or @mention)").setStyle(TextInputStyle.Short).setRequired(true);
+      const i2=new TextInputBuilder().setCustomId("p2").setLabel("Player 2 (username, ID, or @mention)").setStyle(TextInputStyle.Short).setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(i1),new ActionRowBuilder().addComponents(i2));
+      await interaction.showModal(modal);return;
+    }
+    return;
+  }
 
   // ── Scrim: Create new lobby ──
   if(cid==="scrim_create"){
@@ -1291,13 +1589,6 @@ client.on("interactionCreate",async interaction=>{try{
     }
 
     // Watch replay — send ephemeral link
-    if(action.startsWith("watchreplay")){
-      const idx=parseInt(action.replace("watchreplay",""));
-      if(isNaN(idx)||!lobby.replays||!lobby.replays[idx])return interaction.reply({content:"❌ Replay not found.",ephemeral:true});
-      await interaction.reply({content:`📺 [Replay #${idx+1}](${lobby.replays[idx]})`,ephemeral:true});
-      return;
-    }
-
     // Upload draft = button that tells admin to just paste an image in chat
     if(action==="uploaddraft"){
       const isAuth=uid===RAY_ID||ADMIN_IDS.includes(uid)||uid===lobby.creatorId||lobby.teamA.includes(uid)||lobby.teamB.includes(uid);
@@ -1522,7 +1813,7 @@ client.once("ready",async()=>{
         if(mb)await mb.send(`⏰ You've been removed from the Pro queue after 1 hour of inactivity. No match popped during that time.`).catch(()=>{});
       }
       const qCh=guild.channels.cache.find(c=>c.name==="queue-elb-pro"&&c.isTextBased());
-      if(qCh)await refreshQueue(qCh,true).catch(()=>{});
+      if(qCh)await repushQueue(qCh,true).catch(()=>{});
     }
     log("INFO",`Removed ${toRemove.length} inactive players from pro queue after 1h`);
   },60_000);
