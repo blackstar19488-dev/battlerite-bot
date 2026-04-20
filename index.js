@@ -151,6 +151,18 @@ async function removeRole(g,u,r){if(!r||!g)return;const m=await g.members.fetch(
 // ─── STATE ───────────────────────────────────────────────────────────
 let queue=[],proQueue=[],_queueLock=false,_proQueueLock=false;
 const proQueueJoinTime={}; // {playerId: timestamp} for 1h auto-leave
+
+// ─── SCRIM SYSTEM ────────────────────────────────────────────────────
+const RAY_ID="245671110744473600";
+const scrimFile=p("scrim.json");
+let scrim=fs.existsSync(scrimFile)?JSON.parse(fs.readFileSync(scrimFile)):{
+  friday:{teamA:[],teamB:[],confirmed:[],declined:[],validationSent:false,pendingPings:{}},
+  saturday:{teamA:[],teamB:[],confirmed:[],declined:[],validationSent:false,pendingPings:{}},
+  sunday:{teamA:[],teamB:[],confirmed:[],declined:[],validationSent:false,pendingPings:{}},
+  messages:{} // {friday: msgId, saturday: msgId, sunday: msgId}
+};
+async function saveScrim(){try{await fs.promises.writeFile(scrimFile,JSON.stringify(scrim,null,2));}catch(e){log("ERROR","saveScrim:",e);}}
+function resetScrimDay(day){scrim[day]={teamA:[],teamB:[],confirmed:[],declined:[],validationSent:false,pendingPings:{}};}
 let _proPlacementDelay=null; // {timeout, channel, startTime}
 const queueMessages={},proQueueMessages={};
 let ladderMsg=null,ladderChannel=null,betLadderMsg=null,betLadderChannel=null,proLadderMsg=null,proLadderChannel=null;
@@ -318,6 +330,50 @@ async function updateBetLadder(){
 }
 
 // ─── QUEUE UI ────────────────────────────────────────────────────────
+// ─── SCRIM EMBED & BUTTONS ───────────────────────────────────────────
+function scrimEmbed(day){
+  const d=scrim[day],dayLabel=day.charAt(0).toUpperCase()+day.slice(1);
+  const slot=(id)=>{const conf=d.confirmed.includes(id)?" ✅":"";return id?`<@${id}>${conf}`:"*[Empty slot]*";};
+  const t1=[d.teamA[0],d.teamA[1],d.teamA[2]].map(slot).join("\n");
+  const t2=[d.teamB[0],d.teamB[1],d.teamB[2]].map(slot).join("\n");
+  const total=d.teamA.length+d.teamB.length;
+  const confCount=d.confirmed.length;
+  let footer=`${total}/6 players`;
+  if(d.validationSent)footer=`${confCount}/6 confirmed for ${dayLabel}`;
+  return new EmbedBuilder()
+    .setTitle(`🎯  SCRIM — ${dayLabel}`)
+    .setColor(day==="friday"?0x5865F2:day==="saturday"?0xE67E22:0x9B59B6)
+    .addFields({name:"🔵 TEAM 1",value:t1||"*Empty*",inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:"🔴 TEAM 2",value:t2||"*Empty*",inline:true})
+    .setFooter({text:footer});
+}
+function scrimBtns(day){
+  const d=scrim[day];
+  const t1Full=d.teamA.length>=3,t2Full=d.teamB.length>=3;
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`scrim_${day}_joinA`).setLabel("🔵 Join Team 1").setStyle(ButtonStyle.Primary).setDisabled(t1Full),
+    new ButtonBuilder().setCustomId(`scrim_${day}_joinB`).setLabel("🔴 Join Team 2").setStyle(ButtonStyle.Danger).setDisabled(t2Full),
+    new ButtonBuilder().setCustomId(`scrim_${day}_leave`).setLabel("❌ Leave").setStyle(ButtonStyle.Secondary));
+}
+async function refreshScrimChannel(channel){
+  try{
+    const msgs=await channel.messages.fetch({limit:20});
+    const botScrims=msgs.filter(m=>m.author.id===client.user.id&&m.embeds[0]?.title?.includes("SCRIM"));
+    for(const[,m]of botScrims)await m.delete().catch(()=>{});
+    for(const day of ["friday","saturday","sunday"]){
+      const msg=await channel.send({embeds:[scrimEmbed(day)],components:[scrimBtns(day)]}).catch(()=>null);
+      if(msg)scrim.messages[day]=msg.id;
+    }
+    await saveScrim();
+  }catch(e){log("ERROR","refreshScrimChannel:",e);}
+}
+async function updateScrimMessage(channel,day){
+  try{
+    const msgId=scrim.messages[day];if(!msgId)return;
+    const msg=await channel.messages.fetch(msgId).catch(()=>null);
+    if(msg)await msg.edit({embeds:[scrimEmbed(day)],components:[scrimBtns(day)]}).catch(()=>{});
+  }catch(e){log("ERROR","updateScrimMessage:",e);}
+}
+
 function queueEmbed(isPro){
   const m=M(isPro),lm=m.lobbies,q=isPro?proQueue:queue;
   const slot=getFreeLobbySlot(lm);
@@ -777,8 +833,44 @@ client.on("messageCreate",async msg=>{try{
   // ── !help ──
   if(content==="!help"){await msg.channel.send({embeds:[new EmbedBuilder().setTitle("📖  LobbyELO — Commands").setColor(0x5865F2).setDescription(
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n\n"+
-    "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`"
+    "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
+    "**Scrim (Ray + Admin):**\n`!scrim` — Refresh scrim boards in #ray-scrim-queue\n`!removefriday @player` / `!removesaturday` / `!removesunday`\n`!cancelfriday` / `!cancelsaturday` / `!cancelsunday`"
   )]});return;}
+
+  // ── !scrim (Ray + Admin) ──
+  if(content==="!scrim"){
+    if(msg.author.id!==RAY_ID&&!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Only Ray or admins can use this.");
+    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    if(!ch)return msg.reply("❌ Channel #ray-scrim-queue not found.");
+    await refreshScrimChannel(ch);
+    await msg.reply("✅ Scrim boards refreshed.");
+    return;
+  }
+
+  // ── !removefriday / !removesaturday / !removesunday ──
+  for(const day of ["friday","saturday","sunday"]){
+    if(content.startsWith(`!remove${day}`)){
+      if(msg.author.id!==RAY_ID&&!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Only Ray or admins.");
+      const u=msg.mentions.users.first();if(!u)return msg.reply(`Usage: \`!remove${day} @player\``);
+      const d=scrim[day];
+      d.teamA=d.teamA.filter(id=>id!==u.id);d.teamB=d.teamB.filter(id=>id!==u.id);
+      d.confirmed=d.confirmed.filter(id=>id!==u.id);d.declined=d.declined.filter(id=>id!==u.id);
+      delete d.pendingPings[u.id];
+      await saveScrim();
+      const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+      if(ch)await updateScrimMessage(ch,day);
+      await msg.channel.send(`✅ <@${u.id}> removed from **${day}** scrim.`);
+      return;
+    }
+    if(content.startsWith(`!cancel${day}`)){
+      if(msg.author.id!==RAY_ID&&!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Only Ray or admins.");
+      resetScrimDay(day);await saveScrim();
+      const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+      if(ch)await updateScrimMessage(ch,day);
+      await msg.channel.send(`⚠️ **${day.charAt(0).toUpperCase()+day.slice(1)}** scrim cancelled and reset.`);
+      return;
+    }
+  }
 
   // ── !statspro (shortcut for !stats pro) ──
   if(content.startsWith("!statspro")){
@@ -934,6 +1026,75 @@ client.on("messageCreate",async msg=>{try{
 client.on("interactionCreate",async interaction=>{try{
   if(!interaction.isButton())return;
   const cid=interaction.customId;
+
+  // ── Scrim buttons ──
+  if(cid.startsWith("scrim_")){
+    const parts=cid.split("_");const day=parts[1],action=parts[2];
+    const uid=interaction.user.id;
+    const d=scrim[day];if(!d)return;
+    const ch=interaction.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+
+    // Accept/decline validation buttons (posted on validation day)
+    if(action==="accept"||action==="decline"){
+      if(!d.teamA.includes(uid)&&!d.teamB.includes(uid))return interaction.reply({content:"❌ You are not in this scrim.",ephemeral:true});
+      if(action==="accept"){
+        if(d.confirmed.includes(uid))return interaction.reply({content:"✅ Already confirmed.",ephemeral:true});
+        d.confirmed.push(uid);d.declined=d.declined.filter(id=>id!==uid);delete d.pendingPings[uid];
+        await saveScrim();
+        if(ch)await updateScrimMessage(ch,day);
+        await interaction.reply({content:`✅ Presence confirmed for **${day}** scrim!`,ephemeral:true});
+        // Check if all 6 confirmed → post recap and delete scrim message
+        if(d.confirmed.length===6){
+          const genCh=interaction.guild.channels.cache.find(c=>c.name==="general-scrim-chat"&&c.isTextBased());
+          if(genCh){
+            const recap=new EmbedBuilder().setTitle(`🎯  ${day.charAt(0).toUpperCase()+day.slice(1)} Scrim — All Confirmed!`).setColor(0x57F287)
+              .setDescription(`**🔵 Team 1:**\n${d.teamA.map(id=>`<@${id}>`).join("\n")}\n\n**🔴 Team 2:**\n${d.teamB.map(id=>`<@${id}>`).join("\n")}\n\n*Communicate with each other to agree on the time!*`)
+              .setTimestamp();
+            await genCh.send({content:`${d.teamA.concat(d.teamB).map(id=>`<@${id}>`).join(" ")}`,embeds:[recap],allowedMentions:{users:d.teamA.concat(d.teamB)}}).catch(()=>{});
+          }
+          // Delete scrim message from ray-scrim-queue
+          if(ch&&scrim.messages[day]){
+            const msg=await ch.messages.fetch(scrim.messages[day]).catch(()=>null);
+            if(msg)await msg.delete().catch(()=>{});
+            scrim.messages[day]=null;
+          }
+          resetScrimDay(day);await saveScrim();
+        }
+      }else{
+        d.declined.push(uid);d.teamA=d.teamA.filter(id=>id!==uid);d.teamB=d.teamB.filter(id=>id!==uid);delete d.pendingPings[uid];
+        await saveScrim();
+        if(ch)await updateScrimMessage(ch,day);
+        await interaction.reply({content:`❌ You declined — your slot is now open.`,ephemeral:true});
+      }
+      return;
+    }
+
+    // Join Team A
+    if(action==="joinA"){
+      if(d.teamA.includes(uid)||d.teamB.includes(uid))return interaction.reply({content:"❌ You are already in this scrim.",ephemeral:true});
+      if(d.teamA.length>=3)return interaction.reply({content:"❌ Team 1 is full.",ephemeral:true});
+      d.teamA.push(uid);await saveScrim();
+      if(ch)await updateScrimMessage(ch,day);
+      await interaction.reply({content:`✅ Joined **Team 1** for ${day} scrim!`,ephemeral:true});return;
+    }
+    if(action==="joinB"){
+      if(d.teamA.includes(uid)||d.teamB.includes(uid))return interaction.reply({content:"❌ You are already in this scrim.",ephemeral:true});
+      if(d.teamB.length>=3)return interaction.reply({content:"❌ Team 2 is full.",ephemeral:true});
+      d.teamB.push(uid);await saveScrim();
+      if(ch)await updateScrimMessage(ch,day);
+      await interaction.reply({content:`✅ Joined **Team 2** for ${day} scrim!`,ephemeral:true});return;
+    }
+    if(action==="leave"){
+      if(!d.teamA.includes(uid)&&!d.teamB.includes(uid))return interaction.reply({content:"❌ You are not in this scrim.",ephemeral:true});
+      d.teamA=d.teamA.filter(id=>id!==uid);d.teamB=d.teamB.filter(id=>id!==uid);
+      d.confirmed=d.confirmed.filter(id=>id!==uid);d.declined=d.declined.filter(id=>id!==uid);
+      delete d.pendingPings[uid];
+      await saveScrim();
+      if(ch)await updateScrimMessage(ch,day);
+      await interaction.reply({content:`❌ Left **${day}** scrim.`,ephemeral:true});return;
+    }
+    return;
+  }
 
   // ── Queue buttons ──
   if(cid==="q_join"||cid==="pq_join"){
@@ -1154,6 +1315,84 @@ client.once("ready",async()=>{
       if(qCh)await refreshQueue(qCh,true).catch(()=>{});
     }
     log("INFO",`Removed ${toRemove.length} inactive players from pro queue after 1h`);
+  },60_000);
+
+  // ── Scrim validation cron (CET timezone) ──
+  // CET = UTC+1, CEST = UTC+2 (summer). We use Europe/Paris locale.
+  // Check every minute: if it's noon Paris time on friday/sat/sun and validation not sent, send pings.
+  // If 4h passed and player didn't respond, remove them from scrim.
+  setInterval(async()=>{
+    const now=new Date();
+    // Get Paris day and hour
+    const parisStr=now.toLocaleString("en-US",{timeZone:"Europe/Paris",weekday:"long",hour:"numeric",minute:"numeric",hour12:false});
+    // Format: "Friday, 12:00" (with variations)
+    const match=parisStr.match(/(\w+),?\s+(\d{1,2}):(\d{2})/);
+    if(!match)return;
+    const parisDay=match[1].toLowerCase(),parisHour=parseInt(match[2]),parisMinute=parseInt(match[3]);
+
+    // Weekly reset: Monday 00:00 Paris → reset everything
+    if(parisDay==="monday"&&parisHour===0&&parisMinute<5){
+      // Reset all days if not already reset
+      if(scrim.friday.teamA.length>0||scrim.saturday.teamA.length>0||scrim.sunday.teamA.length>0||scrim.friday.confirmed.length>0||scrim.saturday.confirmed.length>0||scrim.sunday.confirmed.length>0){
+        for(const d of ["friday","saturday","sunday"])resetScrimDay(d);
+        await saveScrim();
+        for(const[,guild]of client.guilds.cache){
+          const ch=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+          if(ch)await refreshScrimChannel(ch);
+        }
+        log("INFO","Weekly scrim reset (Monday 00:00 Paris).");
+      }
+    }
+
+    // Validation ping at noon on the scrim day
+    const relevantDay=parisDay==="friday"?"friday":parisDay==="saturday"?"saturday":parisDay==="sunday"?"sunday":null;
+    if(relevantDay&&parisHour===12&&parisMinute<5){
+      const d=scrim[relevantDay];
+      if(!d.validationSent&&(d.teamA.length+d.teamB.length>0)){
+        d.validationSent=true;
+        const all=[...d.teamA,...d.teamB];
+        for(const[,guild]of client.guilds.cache){
+          const ch=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+          if(!ch)continue;
+          for(const uid of all){
+            if(d.confirmed.includes(uid))continue;
+            d.pendingPings[uid]=Date.now();
+            const embed=new EmbedBuilder().setTitle(`🎯  ${relevantDay.charAt(0).toUpperCase()+relevantDay.slice(1)} Scrim — Confirm your presence!`).setColor(0xF1C40F)
+              .setDescription(`<@${uid}> — Are you available to play the **${relevantDay}** scrim tonight?\n\n*You have 4 hours to respond. If you don't, your slot will be opened to others.*`);
+            const row=new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`scrim_${relevantDay}_accept`).setLabel("✅ Accept").setStyle(ButtonStyle.Success),
+              new ButtonBuilder().setCustomId(`scrim_${relevantDay}_decline`).setLabel("❌ Decline").setStyle(ButtonStyle.Danger));
+            await ch.send({content:`<@${uid}>`,embeds:[embed],components:[row],allowedMentions:{users:[uid]}}).catch(()=>{});
+          }
+        }
+        await saveScrim();
+      }
+    }
+
+    // Auto-remove players who didn't respond within 4h
+    for(const day of ["friday","saturday","sunday"]){
+      const d=scrim[day];if(!d.validationSent)continue;
+      const toRemove=[];
+      for(const uid of Object.keys(d.pendingPings)){
+        if(d.confirmed.includes(uid))continue;
+        if(Date.now()-d.pendingPings[uid]>=4*3600_000)toRemove.push(uid);
+      }
+      if(toRemove.length>0){
+        for(const uid of toRemove){
+          d.teamA=d.teamA.filter(id=>id!==uid);d.teamB=d.teamB.filter(id=>id!==uid);
+          delete d.pendingPings[uid];
+          for(const[,guild]of client.guilds.cache){
+            const mb=await guild.members.fetch(uid).catch(()=>null);
+            if(mb)await mb.send(`⏰ You've been removed from the **${day}** scrim for not responding within 4 hours.`).catch(()=>{});
+          }
+        }
+        await saveScrim();
+        for(const[,guild]of client.guilds.cache){
+          const ch=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+          if(ch)await updateScrimMessage(ch,day);
+        }
+      }
+    }
   },60_000);
 });
 
