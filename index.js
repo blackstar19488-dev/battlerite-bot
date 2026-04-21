@@ -435,6 +435,23 @@ function formatTime12h(timeStr){
   const suf=h>=12?"PM":"AM";h=h%12;if(h===0)h=12;
   return `${h}:${mm} ${suf}`;
 }
+function parseTimeInput(str){
+  // Accepts "20:30", "8:30 PM", "8:30PM", "08:30 am", etc. Returns "HH:MM" (24h) or null.
+  if(!str||typeof str!=="string")return null;
+  const s=str.trim().toUpperCase().replace(/\s+/g," ");
+  // 12h: "8:30 PM" / "8:30PM" / "12:00 AM"
+  let m=s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
+  if(m){let h=parseInt(m[1],10);const mm=parseInt(m[2],10);
+    if(h<1||h>12||mm<0||mm>59)return null;
+    if(m[3]==="PM"&&h!==12)h+=12;if(m[3]==="AM"&&h===12)h=0;
+    return `${String(h).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;}
+  // 24h: "20:30"
+  m=s.match(/^(\d{1,2}):(\d{2})$/);
+  if(m){const h=parseInt(m[1],10),mm=parseInt(m[2],10);
+    if(h<0||h>23||mm<0||mm>59)return null;
+    return `${String(h).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;}
+  return null;
+}
 function scrimLobbyEmbed(lobby){
   const slot=(id,n)=>{const conf=id&&lobby.confirmed.includes(id)?" ✅":"";return id?`\`${n}\`  <@${id}>${conf}`:`\`${n}\`  *empty*`;};
   const t1=[slot(lobby.teamA[0],1),slot(lobby.teamA[1],2),slot(lobby.teamA[2],3)].join("\n\n");
@@ -1159,16 +1176,33 @@ client.on("messageCreate",async msg=>{try{
     const lobby=findScrim(lobbyId);if(!lobby)return msg.reply("❌ Scrim lobby not found.");
     const isAuth=msg.author.id===RAY_ID||ADMIN_IDS.includes(msg.author.id)||msg.author.id===lobby.creatorId;
     if(!isAuth)return msg.reply("❌ Only Ray, admins, or the lobby admin can use this.");
-    // Delete message
     const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    // Delete lobby message
     if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});}
     // Delete role
     if(lobby.roleId){const r=msg.guild.roles.cache.get(lobby.roleId);if(r)await r.delete().catch(()=>{});}
     // Remove lobby from state
     scrim.lobbies=scrim.lobbies.filter(l=>l.id!==lobby.id);
     await saveScrim();
-    if(ch)await refreshCreateScrimBtn(ch);
-    await msg.channel.send(`⚠️ Scrim **#${lobby.id}** cancelled and deleted.`);
+    // Clean #ray-scrim-queue — keep only the SCRIM HUB + messages of other active lobbies
+    if(ch){
+      const keepIds=new Set();
+      if(scrim.createBtnMsgId)keepIds.add(scrim.createBtnMsgId);
+      for(const l of scrim.lobbies){if(l.messageId)keepIds.add(l.messageId);}
+      const allMsgs=await ch.messages.fetch({limit:100}).catch(()=>null);
+      if(allMsgs){for(const[,m] of allMsgs){if(!keepIds.has(m.id))await m.delete().catch(()=>{});}}
+      await refreshCreateScrimBtn(ch);
+    }
+    // If the command was typed in ray-scrim-queue, the cleanup above already deleted msg — skip confirmation there.
+    // Otherwise, remove the user's command and send a discreet confirmation that auto-deletes after 5s.
+    if(!ch||msg.channel.id!==ch.id){
+      await msg.delete().catch(()=>{});
+      const reply=await msg.channel.send(`⚠️ Scrim **#${lobby.id}** cancelled.`).catch(()=>null);
+      if(reply)setTimeout(()=>reply.delete().catch(()=>{}),5000);
+    }
+    // DM the lobby admin so they always know it happened
+    const creator=await msg.guild.members.fetch(lobby.creatorId).catch(()=>null);
+    if(creator&&creator.id!==msg.author.id)await creator.send(`⚠️ Your scrim **#${lobby.id}** was cancelled by <@${msg.author.id}>.`).catch(()=>{});
     return;
   }
 
@@ -1358,9 +1392,10 @@ client.on("interactionCreate",async interaction=>{try{
       const isAuth=uid===RAY_ID||ADMIN_IDS.includes(uid)||uid===lobby.creatorId;
       if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, Ray or admins can edit.",ephemeral:true});
       const dateStr=interaction.fields.getTextInputValue("date").trim();
-      const timeStr=interaction.fields.getTextInputValue("time").trim();
+      const timeRaw=interaction.fields.getTextInputValue("time").trim();
       if(!/^\d{1,2}\/\d{1,2}$/.test(dateStr))return interaction.reply({content:"❌ Date format: DD/MM (e.g. 28/04).",ephemeral:true});
-      if(!/^\d{1,2}:\d{2}$/.test(timeStr))return interaction.reply({content:"❌ Time format: HH:MM (e.g. 20:30).",ephemeral:true});
+      const timeStr=parseTimeInput(timeRaw);
+      if(!timeStr)return interaction.reply({content:"❌ Time format: `8:30 PM` or `20:30`.",ephemeral:true});
       lobby.dateStr=dateStr;lobby.timeStr=timeStr;
       await saveScrim();
       const ch=interaction.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
@@ -1537,7 +1572,7 @@ client.on("interactionCreate",async interaction=>{try{
       if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, Ray or admins can edit.",ephemeral:true});
       const modal=new ModalBuilder().setCustomId(`scrim_setdate_${lobby.id}`).setTitle(`Set date/time — Scrim #${lobby.id}`);
       const dateInput=new TextInputBuilder().setCustomId("date").setLabel("Date (DD/MM)").setStyle(TextInputStyle.Short).setPlaceholder("28/04").setRequired(true).setValue(lobby.dateStr||"");
-      const timeInput=new TextInputBuilder().setCustomId("time").setLabel("Time (HH:MM, Paris time)").setStyle(TextInputStyle.Short).setPlaceholder("20:30").setRequired(true).setValue(lobby.timeStr||"");
+      const timeInput=new TextInputBuilder().setCustomId("time").setLabel("Time (Paris time)").setStyle(TextInputStyle.Short).setPlaceholder("8:30 PM or 20:30").setRequired(true).setValue(lobby.timeStr?formatTime12h(lobby.timeStr):"");
       modal.addComponents(new ActionRowBuilder().addComponents(dateInput),new ActionRowBuilder().addComponents(timeInput));
       await interaction.showModal(modal);
       return;
