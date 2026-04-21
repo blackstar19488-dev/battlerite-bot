@@ -203,11 +203,11 @@ const RAY_ID="245671110744473600";
 const MAX_SCRIM_LOBBIES=5;
 const scrimFile=p("scrim.json");
 // New state: array of lobbies + createButton message id
-let scrim=fs.existsSync(scrimFile)?JSON.parse(fs.readFileSync(scrimFile)):{
-  lobbies:[], // array of {id, creatorId, roleId, dateStr, timeStr, teamA, teamB, confirmed, declined, validationSent, validationPingedAt, pendingPings, messageId, status, replays, drafts}
-  createBtnMsgId:null,
-  archivedCount:0
-};
+const _scrimDefaults={lobbies:[],createBtnMsgId:null,archivedCount:0};
+let scrim=fs.existsSync(scrimFile)?JSON.parse(fs.readFileSync(scrimFile)):{..._scrimDefaults};
+// Merge with defaults to guarantee all fields exist (old scrim.json structures may lack `lobbies`)
+scrim={..._scrimDefaults,...scrim};
+if(!Array.isArray(scrim.lobbies))scrim.lobbies=[];
 // Default fields:
 // id: hex string "A3F7"
 // creatorId: discord user id
@@ -707,6 +707,8 @@ async function startLobby(channel,lobbyId,isPro=false){
   for(const id of lobby.expected)await removeRole(guild,id,inQueueRole);
   await refreshQueue(channel,isPro,false).catch(()=>{});
   lobby.lobbyPingMsg=await channel.send({content:`🎮 **${isPro?"Pro ":""}Lobby #${lobbyId} — Queue full!** ${lobby.expected.map(id=>`<@${id}>`).join(" ")}\nJoin voice channel **🔊 ${isPro?"PRO ":""}LOBBY #${lobbyId} — JOIN** to start the match.`,allowedMentions:{users:lobby.expected}}).catch(()=>null);
+  // Repush queue below the lobby ping so it stays visible at the bottom
+  await repushQueue(channel,isPro,allSlotsActive(lm)).catch(()=>{});
   for(const id of lobby.expected){const mb=await guild.members.fetch(id).catch(()=>null);if(mb)await mb.send(`🎮 **${isPro?"Pro ":""}Lobby #${lobbyId} is ready!** Join the voice channel to start.`).catch(()=>{});}
   // Create lobby voice — pro: only Pro role can see
   const voicePerms=isPro?[
@@ -899,6 +901,10 @@ async function finishMatch(lobby,winner){
     if(!lobby.isPro){for(const id of betW){if(stats[id].betStreak===5)await genCh.send({embeds:[new EmbedBuilder().setTitle("🔮  THE ORACLE").setColor(0x9B59B6).setDescription(`<@${id}> has predicted **5 matches correctly** in a row!`)]}).catch(()=>{});}}
   }
   await cleanupLobby(lobby);
+  // Repush queue to bottom of queue channel (result embed + announcements pushed it up)
+  const qChName=lobby.isPro?"queue-elb-pro":"queue-lobby-elo";
+  const qCh=guild.channels.cache.find(c=>c.name===qChName&&c.isTextBased());
+  if(qCh){const lm2=lobby.isPro?proLobbies:lobbies;await repushQueue(qCh,lobby.isPro,allSlotsActive(lm2)).catch(()=>{});}
 }
 
 // ─── CANCEL / CLEANUP ────────────────────────────────────────────────
@@ -957,7 +963,9 @@ client.on("messageCreate",async msg=>{try{
       if(isPro){const member=await msg.guild.members.fetch(userId).catch(()=>null);if(!member||!member.roles.cache.some(r=>r.name==="Pro")){if(isPro)_proQueueLock=false;return;}}
       const qCh=msg.guild.channels.cache.find(c=>c.name===m.qCh&&c.isTextBased());
       const isQCh=qCh&&msg.channel.id===qCh.id;
-      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
+      const placementInQ=isPro?q.filter(id=>placementPlayers.has(id)).length:0;
+      const dodgedInQ=isPro?q.filter(id=>getDodgeCount(id)>0).length:0;
+      const maxSlots=isPro?6+placementInQ+dodgedInQ:6;
       if(!allSlotsActive(lm)&&!q.includes(userId)&&!findLobbyByPlayer(userId)&&!findLobbyByExpected(userId)&&!bannedPlayers.has(userId)&&q.length<maxSlots){
         m.ensure(userId);q.push(userId);await addRole(msg.guild,userId,inQueueRole);
         if(isPro)proQueueJoinTime[userId]=Date.now();
@@ -1061,7 +1069,7 @@ client.on("messageCreate",async msg=>{try{
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n`!command` — Buttons menu for all commands\n\n"+
     "**Pro Dodge (anyone):**\n`!dodge @player` — Don't match with this player in Pro\n`!undodge @player` — Remove from dodge list\n`!mydodge` — Show your dodge list\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
-    "**Scrim (Ray + Admin + Lobby Admin):**\n`!scrim` — Create a new scrim lobby\n`!removescrim <id> @player` — Remove a player from a scrim\n`!cancelscrim <id>` — Cancel and delete a scrim\n`!draft <id>` (with image attached) — Upload a draft screenshot"
+    "**Scrim:**\n`!scrim` — Create a new scrim lobby (anyone)\n`!removescrim <id> @player` — Remove a player (lobby admin/Ray/admin)\n`!cancelscrim <id>` — Cancel and delete a scrim (lobby admin/Ray/admin)\n`!draft <id>` (with image attached) — Upload a draft screenshot"
   )]});return;}
 
   // ── !command — buttons menu (ephemeral) ──
@@ -1091,9 +1099,8 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
-  // ── !scrim (Ray + Admin) — shows create scrim hub if no active lobbies ──
+  // ── !scrim (anyone) — creates a scrim lobby ──
   if(content==="!scrim"){
-    if(msg.author.id!==RAY_ID&&!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Only Ray or admins can use this.");
     const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
     if(!ch)return msg.reply("❌ Channel #ray-scrim-queue not found.");
     if(activeScrims().length>=MAX_SCRIM_LOBBIES)return msg.reply(`❌ Max ${MAX_SCRIM_LOBBIES} active scrim lobbies reached.`);
@@ -1641,8 +1648,10 @@ client.on("interactionCreate",async interaction=>{try{
       if(bannedPlayers.has(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ You are banned.",ephemeral:true});}
       if(findLobbyByPlayer(interaction.user.id)||findLobbyByExpected(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ Already in a match.",ephemeral:true});}
       if(q.includes(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Already in queue.",ephemeral:true});}
-      // Queue full check — pro allows 7 if placements in queue
-      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
+      // Queue full check — formula matches queueEmbed: 6 + placements + dodgers (pro only)
+      const placementInQ=isPro?q.filter(id=>placementPlayers.has(id)).length:0;
+      const dodgedInQ=isPro?q.filter(id=>getDodgeCount(id)>0).length:0;
+      const maxSlots=isPro?6+placementInQ+dodgedInQ:6;
       if(q.length>=maxSlots){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
       q.push(interaction.user.id);await addRole(interaction.guild,interaction.user.id,inQueueRole);
       if(isPro)proQueueJoinTime[interaction.user.id]=Date.now();
