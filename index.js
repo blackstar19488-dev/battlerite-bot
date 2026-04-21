@@ -427,12 +427,21 @@ async function updateBetLadder(){
 
 // ─── QUEUE UI ────────────────────────────────────────────────────────
 // ─── SCRIM LOBBY EMBED & BUTTONS ─────────────────────────────────────
+function formatTime12h(timeStr){
+  // "20:30" → "8:30 PM" ; "09:05" → "9:05 AM" ; invalid → original
+  if(!timeStr||typeof timeStr!=="string")return timeStr||"";
+  const m=timeStr.match(/^(\d{1,2}):(\d{2})$/);if(!m)return timeStr;
+  let h=parseInt(m[1],10);const mm=m[2];if(isNaN(h)||h<0||h>23)return timeStr;
+  const suf=h>=12?"PM":"AM";h=h%12;if(h===0)h=12;
+  return `${h}:${mm} ${suf}`;
+}
 function scrimLobbyEmbed(lobby){
-  const slot=(id)=>{const conf=lobby.confirmed.includes(id)?" ✅":"";return id?`<@${id}>${conf}`:"*[Empty slot]*";};
-  const t1=[lobby.teamA[0],lobby.teamA[1],lobby.teamA[2]].map(slot).join("\n");
-  const t2=[lobby.teamB[0],lobby.teamB[1],lobby.teamB[2]].map(slot).join("\n");
+  const slot=(id,n)=>{const conf=id&&lobby.confirmed.includes(id)?" ✅":"";return id?`\`${n}\`  <@${id}>${conf}`:`\`${n}\`  *empty*`;};
+  const t1=[slot(lobby.teamA[0],1),slot(lobby.teamA[1],2),slot(lobby.teamA[2],3)].join("\n\n");
+  const t2=[slot(lobby.teamB[0],1),slot(lobby.teamB[1],2),slot(lobby.teamB[2],3)].join("\n\n");
   const total=lobby.teamA.length+lobby.teamB.length,confCount=lobby.confirmed.length;
-  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${lobby.timeStr}**`:"📅 *No date/time set*";
+  const t1Count=lobby.teamA.length,t2Count=lobby.teamB.length;
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${formatTime12h(lobby.timeStr)}**`:"📅 *No date/time set*";
   let title=`🎯  SCRIM #${lobby.id}`;
   let statusStr=`${total}/6 players`;
   if(lobby.status==="validated")statusStr=`✅ All 6 confirmed — Session in progress`;
@@ -440,8 +449,8 @@ function scrimLobbyEmbed(lobby){
   return new EmbedBuilder()
     .setTitle(title)
     .setColor(lobby.status==="validated"?0x57F287:0x5865F2)
-    .setDescription(`${whenStr}\n\n👑 **Lobby Admin:** <@${lobby.creatorId}>`)
-    .addFields({name:"🔵 TEAM 1",value:t1||"*Empty*",inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:"🔴 TEAM 2",value:t2||"*Empty*",inline:true})
+    .setDescription(`${whenStr}\n👑 **Lobby Admin:** <@${lobby.creatorId}>\n\n━━━━━━━━━━━━━━━━━━━━━━`)
+    .addFields({name:`🔵 TEAM 1 — ${t1Count}/3`,value:t1,inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM 2 — ${t2Count}/3`,value:t2,inline:true})
     .setFooter({text:statusStr});
 }
 function scrimLobbyBtns(lobby){
@@ -484,7 +493,7 @@ async function updateScrimLobbyMessage(channel,lobby){
 
 // ─── SCRIM HISTORY EMBED & BUTTONS ───────────────────────────────────
 function scrimHistoryEmbed(lobby){
-  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${lobby.timeStr}**`:"📅 *No date/time*";
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${formatTime12h(lobby.timeStr)}**`:"📅 *No date/time*";
   const drafts=(lobby.drafts||[]).length>0?(lobby.drafts||[]).map((u,i)=>`[Draft ${i+1}](${u})`).join(" • "):"*No draft uploaded*";
   const replays=(lobby.replays||[]).length>0?`${(lobby.replays||[]).length} replay(s) available`:"*No replay uploaded*";
   const e=new EmbedBuilder().setTitle(`🏁  Scrim #${lobby.id} — Recap`).setColor(0x57F287)
@@ -1356,7 +1365,7 @@ client.on("interactionCreate",async interaction=>{try{
       await saveScrim();
       const ch=interaction.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
       if(ch)await updateScrimLobbyMessage(ch,lobby);
-      await interaction.reply({content:`✅ Date/time set to **${dateStr} — ${timeStr}**.`,ephemeral:true});
+      await interaction.reply({content:`✅ Date/time set to **${dateStr} — ${formatTime12h(timeStr)}**.`,ephemeral:true});
       return;
     }
     // Scrim replay modal
@@ -1549,7 +1558,7 @@ client.on("interactionCreate",async interaction=>{try{
           const genCh=interaction.guild.channels.cache.find(c=>c.name==="general-scrim-chat"&&c.isTextBased());
           if(genCh){
             const recap=new EmbedBuilder().setTitle(`🎯  Scrim #${lobby.id} — All Confirmed!`).setColor(0x57F287)
-              .setDescription(`📅 **${lobby.dateStr||"?"} — ${lobby.timeStr||"?"}**\n\n**🔵 Team 1:**\n${lobby.teamA.map(id=>`<@${id}>`).join("\n")}\n\n**🔴 Team 2:**\n${lobby.teamB.map(id=>`<@${id}>`).join("\n")}\n\n*Communicate with each other to agree on the time!*`)
+              .setDescription(`📅 **${lobby.dateStr||"?"} — ${lobby.timeStr?formatTime12h(lobby.timeStr):"?"}**\n\n**🔵 Team 1:**\n${lobby.teamA.map(id=>`<@${id}>`).join("\n")}\n\n**🔴 Team 2:**\n${lobby.teamB.map(id=>`<@${id}>`).join("\n")}\n\n*Communicate with each other to agree on the time!*`)
               .setTimestamp();
             await genCh.send({content:`${lobby.teamA.concat(lobby.teamB).map(id=>`<@${id}>`).join(" ")}`,embeds:[recap],allowedMentions:{users:lobby.teamA.concat(lobby.teamB)}}).catch(()=>{});
           }
@@ -1571,7 +1580,7 @@ client.on("interactionCreate",async interaction=>{try{
       if(!lobby.teamA.includes(uid)&&!lobby.teamB.includes(uid))return interaction.reply({content:"❌ Only players in the scrim can end the session.",ephemeral:true});
       lobby.status="archived";lobby.archivedAt=Date.now();scrim.archivedCount++;
       // Edit original message to show archived
-      if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m){const archEmbed=new EmbedBuilder().setTitle(`🎯  SCRIM #${lobby.id} — ARCHIVED`).setColor(0x95A5A6).setDescription(`📅 **${lobby.dateStr||"?"} — ${lobby.timeStr||"?"}**\n\nThis scrim session has ended. See #history-scrim for the recap.`);await m.edit({embeds:[archEmbed],components:[]}).catch(()=>{});}}
+      if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m){const archEmbed=new EmbedBuilder().setTitle(`🎯  SCRIM #${lobby.id} — ARCHIVED`).setColor(0x95A5A6).setDescription(`📅 **${lobby.dateStr||"?"} — ${lobby.timeStr?formatTime12h(lobby.timeStr):"?"}**\n\nThis scrim session has ended. See #history-scrim for the recap.`);await m.edit({embeds:[archEmbed],components:[]}).catch(()=>{});}}
       // Post in history-scrim with screenshots/replays buttons
       const histCh=interaction.guild.channels.cache.find(c=>c.name==="history-scrim"&&c.isTextBased());
       if(histCh){
@@ -1878,7 +1887,7 @@ client.once("ready",async()=>{
             if(lobby.confirmed.includes(uid))continue;
             lobby.pendingPings[uid]=nowMs;
             const embed=new EmbedBuilder().setTitle(`🎯  Scrim #${lobby.id} — Confirm your presence!`).setColor(0xF1C40F)
-              .setDescription(`<@${uid}> — Are you available for the scrim on **${lobby.dateStr} at ${lobby.timeStr}**?\n\n*You have ${timeoutHours} hours to respond. If not, your slot will be opened.*`);
+              .setDescription(`<@${uid}> — Are you available for the scrim on **${lobby.dateStr} at ${formatTime12h(lobby.timeStr)}**?\n\n*You have ${timeoutHours} hours to respond. If not, your slot will be opened.*`);
             const row=new ActionRowBuilder().addComponents(
               new ButtonBuilder().setCustomId(`scrim_${lobby.id}_accept`).setLabel("✅ Accept").setStyle(ButtonStyle.Success),
               new ButtonBuilder().setCustomId(`scrim_${lobby.id}_decline`).setLabel("❌ Decline").setStyle(ButtonStyle.Danger));
