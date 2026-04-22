@@ -557,49 +557,20 @@ function queueBtns(isPro,disabled=false){
     new ButtonBuilder().setCustomId(pre+"leave").setLabel("❌  Leave").setStyle(ButtonStyle.Danger).setDisabled(disabled));
 }
 async function refreshQueue(channel,isPro,locked=false){
-  const msgs=isPro?proQueueMessages:queueMessages;
-  // Clean up messages from OTHER channels only
-  for(const chId of Object.keys(msgs)){if(chId===channel.id)continue;const ch=client.channels.cache.get(chId);if(!ch){delete msgs[chId];continue;}msgs[chId]?.delete().catch(()=>{});delete msgs[chId];}
-  const ex=msgs[channel.id];
-  if(ex){
-    try{
-      await ex.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
-      return;
-    }catch(e){
-      delete msgs[channel.id];
-    }
-  }
-  // No existing message — find any orphan queue messages and try to edit
-  try{
-    const recent=await channel.messages.fetch({limit:30});
-    const old=recent.filter(m=>m.author.id===client.user.id&&m.embeds.length>0&&m.embeds[0].title?.includes("Queue"));
-    if(old.size>0){
-      // Delete all but newest, edit newest
-      const sorted=[...old.values()].sort((a,b)=>b.createdTimestamp-a.createdTimestamp);
-      const newest=sorted[0];
-      for(let i=1;i<sorted.length;i++)await sorted[i].delete().catch(()=>{});
-      try{
-        await newest.edit({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
-        msgs[channel.id]=newest;
-        return;
-      }catch(e){await newest.delete().catch(()=>{});}
-    }
-  }catch(e){}
-  msgs[channel.id]=await channel.send({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
+  return repushQueue(channel,isPro,locked);
 }
 
-// Repush the queue message at the bottom of the channel (delete old, send new)
+// Delete ALL queue messages in the channel, then post ONE new queue message at the bottom
 async function repushQueue(channel,isPro,locked=false){
   const msgs=isPro?proQueueMessages:queueMessages;
-  const ex=msgs[channel.id];
-  if(ex)await ex.delete().catch(()=>{});
-  delete msgs[channel.id];
-  // Also clean up other queue messages
+  // Delete every queue message in this channel (both tracked and orphan)
   try{
-    const recent=await channel.messages.fetch({limit:30});
-    const old=recent.filter(m=>m.author.id===client.user.id&&m.embeds.length>0&&m.embeds[0].title?.includes("Queue"));
-    for(const[,m]of old)await m.delete().catch(()=>{});
+    const recent=await channel.messages.fetch({limit:50});
+    const allQueueMsgs=recent.filter(m=>m.author.id===client.user.id&&m.embeds.length>0&&(m.embeds[0].title?.includes("QUEUE")||m.embeds[0].title?.includes("Queue")));
+    for(const[,m]of allQueueMsgs)await m.delete().catch(()=>{});
   }catch(e){}
+  delete msgs[channel.id];
+  // Post the single new message
   msgs[channel.id]=await channel.send({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
 }
 
@@ -939,26 +910,25 @@ async function cleanupLobby(lobby){
   if(ch){await refreshQueue(ch,lobby.isPro,false).catch(()=>{});tryStartLobby(ch,lobby.isPro);}
 }
 
-// ─── QUEUE AUTO-REPUSH (triggered by any message in queue channels) ──
+// ─── QUEUE AUTO-REPUSH (triggered by non-queue messages in queue channels) ──
+const _autoRepushPending={}; // per-channel debounce
 client.on("messageCreate",async msg=>{
   try{
     if(msg.channel.name!=="queue-elb-pro"&&msg.channel.name!=="queue-lobby-elo")return;
-    // Ignore our own queue messages to prevent infinite loop
-    if(msg.author.id===client.user.id){
-      const title=msg.embeds?.[0]?.title||"";
-      if(title.includes("QUEUE")||title.includes("Queue"))return;
-    }
+    // IGNORE anything the bot posts (queue messages, recaps, AFK, etc.)
+    // This prevents the infinite loop of bot posting → trigger → repush → new message → trigger...
+    if(msg.author.id===client.user.id)return;
+    const chId=msg.channel.id;
+    // Debounce: if already scheduled, skip
+    if(_autoRepushPending[chId])return;
     const isProCh=msg.channel.name==="queue-elb-pro";
-    const msgs=isProCh?proQueueMessages:queueMessages;
-    // Don't repush if THIS message IS the queue message itself
-    if(msgs[msg.channel.id]&&msgs[msg.channel.id].id===msg.id)return;
-    // Delay to let any concurrent refreshQueue finish
-    setTimeout(async()=>{
+    _autoRepushPending[chId]=setTimeout(async()=>{
+      delete _autoRepushPending[chId];
       try{
         const lm=isProCh?proLobbies:lobbies;
         await repushQueue(msg.channel,isProCh,allSlotsActive(lm));
       }catch(e){log("ERROR","auto-repush:",e);}
-    },1500);
+    },2500);
   }catch(e){log("ERROR","auto-repush handler:",e);}
 });
 
