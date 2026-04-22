@@ -154,6 +154,7 @@ const proQueueJoinTime={}; // {playerId: timestamp} for 1h auto-leave
 
 // ─── DODGE SYSTEM (Pro only) ─────────────────────────────────────────
 const DODGE_PROTECTED_ID="110378344192675840"; // Gerninja - cannot be dodged
+const PRIORITY_USER_ID="341553327412346880"; // Silent priority — never excluded from Pro matches due to dodge conflicts
 const dodgeFile=p("dodge.json");
 let dodges=fs.existsSync(dodgeFile)?JSON.parse(fs.readFileSync(dodgeFile)):{}; // {userId: [dodgedId1, dodgedId2, ...]}
 async function saveDodges(){try{await fs.promises.writeFile(dodgeFile,JSON.stringify(dodges,null,2));}catch(e){log("ERROR","saveDodges:",e);}}
@@ -173,20 +174,29 @@ function findValidScrimGroup(){
   // Find 6 players in proQueue where no one dodges another in the group
   // Returns the array of 6 player IDs that can form a match, or null if impossible
   if(proQueue.length<6)return null;
-  // Try to find any combination of 6 with no dodge conflicts
-  // Greedy: try adding from front, skip if conflict with already-selected
+  // Check for dodge conflict — PRIORITY_USER_ID never conflicts (silent priority)
+  const hasConflict=(a,b)=>{
+    if(a===PRIORITY_USER_ID||b===PRIORITY_USER_ID)return false;
+    return (dodges[a]||[]).includes(b)||(dodges[b]||[]).includes(a);
+  };
   const tryGreedy=(startList)=>{
     const selected=[];
     for(const id of startList){
       if(selected.length>=6)break;
       let conflict=false;
       for(const sel of selected){
-        if((dodges[id]||[]).includes(sel)||(dodges[sel]||[]).includes(id)){conflict=true;break;}
+        if(hasConflict(id,sel)){conflict=true;break;}
       }
       if(!conflict)selected.push(id);
     }
     return selected.length===6?selected:null;
   };
+  // If priority user is in queue, always try with them FIRST
+  if(proQueue.includes(PRIORITY_USER_ID)){
+    const rest=proQueue.filter(id=>id!==PRIORITY_USER_ID);
+    let result=tryGreedy([PRIORITY_USER_ID,...rest]);
+    if(result)return result;
+  }
   // Try original order first
   let result=tryGreedy(proQueue);
   if(result)return result;
@@ -194,6 +204,12 @@ function findValidScrimGroup(){
   const dodgedSet=getAllDodgedInPro();
   const nonDodged=proQueue.filter(id=>!dodgedSet.has(id));
   const dodged=proQueue.filter(id=>dodgedSet.has(id));
+  // Priority user comes first even if technically dodged
+  if(proQueue.includes(PRIORITY_USER_ID)){
+    const others=[...nonDodged,...dodged].filter(id=>id!==PRIORITY_USER_ID);
+    result=tryGreedy([PRIORITY_USER_ID,...others]);
+    if(result)return result;
+  }
   result=tryGreedy([...nonDodged,...dodged]);
   return result;
 }
@@ -203,37 +219,30 @@ const RAY_ID="245671110744473600";
 const MAX_SCRIM_LOBBIES=5;
 const scrimFile=p("scrim.json");
 // New state: array of lobbies + createButton message id
-const _scrimDefaults={lobbies:[],createBtnMsgId:null,archivedCount:0};
-let scrim=fs.existsSync(scrimFile)?JSON.parse(fs.readFileSync(scrimFile)):{..._scrimDefaults};
-// Merge with defaults to guarantee all fields exist (old scrim.json structures may lack `lobbies`)
-scrim={..._scrimDefaults,...scrim};
-if(!Array.isArray(scrim.lobbies))scrim.lobbies=[];
+let scrim=fs.existsSync(scrimFile)?JSON.parse(fs.readFileSync(scrimFile)):{
+  lobbies:[], // array of {id, creatorId, roleId, dateStr, timeStr, teamA, teamB, confirmed, declined, validationSent, validationPingedAt, pendingPings, messageId, status, replays, drafts}
+  createBtnMsgId:null,
+  archivedCount:0
+};
 // Default fields:
 // id: hex string "A3F7"
 // creatorId: discord user id
 // roleId: discord role id "Admin Lobby #A3F7"
 // dateStr: "DD/MM" or null
-// timeStr: "HH:MM" (24h, Paris) or null
+// timeStr: "HH:MM" or null
 // teamA, teamB: arrays of ids (max 3 each)
-// captains: array of ids (players promoted by the lobby admin)
+// confirmed: array of ids (the 6 who confirmed)
+// declined: array of ids
+// validationSent: bool
+// validationPingedAt: timestamp of first ping (to compute timeout)
+// pendingPings: {uid: timestamp}
 // messageId: id of main message in ray-scrim-queue
-// status: "open" (accepting joins) | "validated" (time reached & 6/6, session live) | "archived"
+// status: "open" (accepting joins) | "validated" (6/6 confirmed) | "archived"
 // replays: array of url strings (max 5)
 // drafts: array of image urls (uploaded screenshots)
-// Legacy fields (still present on old lobbies for back-compat, no longer written): confirmed, declined, validationSent, validationPingedAt, pendingPings, timeoutHours
 async function saveScrim(){try{await fs.promises.writeFile(scrimFile,JSON.stringify(scrim,null,2));}catch(e){log("ERROR","saveScrim:",e);}}
 function generateScrimId(){return Math.random().toString(16).slice(2,6).toUpperCase();}
 function findScrim(id){return scrim.lobbies.find(l=>l.id===id);}
-// Back-compat: ensure all loaded lobbies have a captains array (for scrim.json saved before v4.6)
-for(const _l of scrim.lobbies){if(!Array.isArray(_l.captains))_l.captains=[];}
-// Central auth check for scrim actions: Ray + server admins + lobby creator + lobby captains
-function isScrimAuthorized(userId,lobby){
-  if(!lobby)return false;
-  if(userId===RAY_ID||ADMIN_IDS.includes(userId))return true;
-  if(userId===lobby.creatorId)return true;
-  if(Array.isArray(lobby.captains)&&lobby.captains.includes(userId))return true;
-  return false;
-}
 function activeScrims(){return scrim.lobbies.filter(l=>l.status!=="archived");}
 let _proPlacementDelay=null; // {timeout, channel, startTime}
 const queueMessages={},proQueueMessages={};
@@ -434,92 +443,21 @@ async function updateBetLadder(){
 
 // ─── QUEUE UI ────────────────────────────────────────────────────────
 // ─── SCRIM LOBBY EMBED & BUTTONS ─────────────────────────────────────
-function formatTime12h(timeStr){
-  // "20:30" → "8:30 PM" ; "09:05" → "9:05 AM" ; invalid → original
-  if(!timeStr||typeof timeStr!=="string")return timeStr||"";
-  const m=timeStr.match(/^(\d{1,2}):(\d{2})$/);if(!m)return timeStr;
-  let h=parseInt(m[1],10);const mm=m[2];if(isNaN(h)||h<0||h>23)return timeStr;
-  const suf=h>=12?"PM":"AM";h=h%12;if(h===0)h=12;
-  return `${h}:${mm} ${suf}`;
-}
-function parseTimeInput(str){
-  // Accepts "20:30", "8:30 PM", "8:30PM", "08:30 am", etc. Returns "HH:MM" (24h) or null.
-  if(!str||typeof str!=="string")return null;
-  const s=str.trim().toUpperCase().replace(/\s+/g," ");
-  // 12h: "8:30 PM" / "8:30PM" / "12:00 AM"
-  let m=s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
-  if(m){let h=parseInt(m[1],10);const mm=parseInt(m[2],10);
-    if(h<1||h>12||mm<0||mm>59)return null;
-    if(m[3]==="PM"&&h!==12)h+=12;if(m[3]==="AM"&&h===12)h=0;
-    return `${String(h).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;}
-  // 24h: "20:30"
-  m=s.match(/^(\d{1,2}):(\d{2})$/);
-  if(m){const h=parseInt(m[1],10),mm=parseInt(m[2],10);
-    if(h<0||h>23||mm<0||mm>59)return null;
-    return `${String(h).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;}
-  return null;
-}
-// Compute Unix timestamp (seconds) from scrim's Paris-time dateStr "DD/MM" + timeStr "HH:MM".
-// Returns null if data missing. Picks year so the resulting moment is within ~1 day before "now" or later.
-function scrimUnixSeconds(lobby){
-  if(!lobby.dateStr||!lobby.timeStr)return null;
-  const dm=lobby.dateStr.split("/");if(dm.length!==2)return null;
-  const day=parseInt(dm[0],10),mon=parseInt(dm[1],10);
-  const hm=lobby.timeStr.split(":");if(hm.length!==2)return null;
-  const hh=parseInt(hm[0],10),mm=parseInt(hm[1],10);
-  if([day,mon,hh,mm].some(x=>isNaN(x)))return null;
-  const nowParisParts=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Paris",year:"numeric"}).formatToParts(new Date());
-  let year=parseInt(nowParisParts.find(p=>p.type==="year").value,10);
-  // Target Paris wall clock as UTC ms (what we'd get if we mistakenly treated Paris as UTC).
-  const buildUnix=(y)=>{
-    const wantAsUtc=Date.UTC(y,mon-1,day,hh,mm,0);
-    // Initial guess: the Paris wall clock IS the UTC. Then adjust by the Paris offset at that guess.
-    let guess=wantAsUtc;
-    for(let i=0;i<3;i++){
-      const parts=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Paris",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).formatToParts(new Date(guess));
-      const pm={};parts.forEach(p=>pm[p.type]=p.value);
-      // parisWallAsUtc is what the Paris wall clock looks like, treated as UTC
-      const parisWallAsUtc=Date.UTC(parseInt(pm.year),parseInt(pm.month)-1,parseInt(pm.day),parseInt(pm.hour==="24"?"0":pm.hour),parseInt(pm.minute),0);
-      // offset = parisWallAsUtc - guess = +offset in ms (e.g. +2h in summer)
-      const offset=parisWallAsUtc-guess;
-      // We want: Paris wall clock == wantAsUtc (treated as UTC). So real UTC = wantAsUtc - offset.
-      const next=wantAsUtc-offset;
-      if(next===guess)break;
-      guess=next;
-    }
-    return Math.floor(guess/1000);
-  };
-  let unix=buildUnix(year);
-  const nowSec=Math.floor(Date.now()/1000);
-  if(nowSec-unix>86400)unix=buildUnix(year+1);
-  return unix;
-}
-// Returns a Discord timestamp string "<t:UNIX:F> (<t:UNIX:R>)" or a fallback text.
-function scrimTimestampStr(lobby){
-  const u=scrimUnixSeconds(lobby);
-  if(!u)return lobby.dateStr&&lobby.timeStr?`**${lobby.dateStr} — ${formatTime12h(lobby.timeStr)}**`:"*No date/time set*";
-  return `<t:${u}:F> (<t:${u}:R>)`;
-}
 function scrimLobbyEmbed(lobby){
-  const captains=Array.isArray(lobby.captains)?lobby.captains:[];
-  const slot=(id,n)=>{
-    if(!id)return `\`${n}\`  *empty*`;
-    const cr=captains.includes(id)?"👑 ":"";
-    return `\`${n}\`  ${cr}<@${id}>`;
-  };
-  const t1=[slot(lobby.teamA[0],1),slot(lobby.teamA[1],2),slot(lobby.teamA[2],3)].join("\n\n");
-  const t2=[slot(lobby.teamB[0],1),slot(lobby.teamB[1],2),slot(lobby.teamB[2],3)].join("\n\n");
-  const total=lobby.teamA.length+lobby.teamB.length;
-  const t1Count=lobby.teamA.length,t2Count=lobby.teamB.length;
-  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 ${scrimTimestampStr(lobby)}`:"📅 *No date/time set*";
+  const slot=(id)=>{const conf=lobby.confirmed.includes(id)?" ✅":"";return id?`<@${id}>${conf}`:"*[Empty slot]*";};
+  const t1=[lobby.teamA[0],lobby.teamA[1],lobby.teamA[2]].map(slot).join("\n");
+  const t2=[lobby.teamB[0],lobby.teamB[1],lobby.teamB[2]].map(slot).join("\n");
+  const total=lobby.teamA.length+lobby.teamB.length,confCount=lobby.confirmed.length;
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${lobby.timeStr}**`:"📅 *No date/time set*";
   let title=`🎯  SCRIM #${lobby.id}`;
-  let statusStr=lobby.status==="validated"?`✅ Session in progress`:`${total}/6 players`;
-  const captainsLine=captains.length>0?`\n👑 **Captains:** ${captains.map(id=>`<@${id}>`).join(", ")}`:"";
+  let statusStr=`${total}/6 players`;
+  if(lobby.status==="validated")statusStr=`✅ All 6 confirmed — Session in progress`;
+  else if(lobby.validationSent)statusStr=`${confCount}/6 confirmed`;
   return new EmbedBuilder()
     .setTitle(title)
     .setColor(lobby.status==="validated"?0x57F287:0x5865F2)
-    .setDescription(`${whenStr}\n👑 **Lobby Admin:** <@${lobby.creatorId}>${captainsLine}\n\n━━━━━━━━━━━━━━━━━━━━━━`)
-    .addFields({name:`🔵 TEAM 1 — ${t1Count}/3`,value:t1,inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM 2 — ${t2Count}/3`,value:t2,inline:true})
+    .setDescription(`${whenStr}\n\n👑 **Lobby Admin:** <@${lobby.creatorId}>`)
+    .addFields({name:"🔵 TEAM 1",value:t1||"*Empty*",inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:"🔴 TEAM 2",value:t2||"*Empty*",inline:true})
     .setFooter({text:statusStr});
 }
 function scrimLobbyBtns(lobby){
@@ -531,7 +469,11 @@ function scrimLobbyBtns(lobby){
   const row2=new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`scrim_${lobby.id}_setdate`).setLabel("📅 Set date/time").setStyle(ButtonStyle.Secondary).setDisabled(lobby.status!=="open"));
   if(lobby.status==="validated"){
-    row2.addComponents(new ButtonBuilder().setCustomId(`scrim_${lobby.id}_end`).setLabel("🏁 End scrim session").setStyle(ButtonStyle.Success));
+    // During validated session: Upload Draft + End session buttons
+    row2.addComponents(
+      new ButtonBuilder().setCustomId(`scrim_${lobby.id}_uploaddraft`).setLabel(`📸 Upload Draft ${(lobby.drafts||[]).length+1}`).setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`scrim_${lobby.id}_end`).setLabel("🏁 End scrim session").setStyle(ButtonStyle.Success)
+    );
   }
   return [row1,row2];
 }
@@ -559,34 +501,10 @@ async function updateScrimLobbyMessage(channel,lobby){
     if(msg)await msg.edit({embeds:[scrimLobbyEmbed(lobby)],components:scrimLobbyBtns(lobby)}).catch(()=>{});
   }catch(e){log("ERROR","updateScrimLobbyMessage:",e);}
 }
-// Transition lobby → "validated" if 6 players AND scheduled time has arrived (no more manual validation).
-async function maybeAutoValidate(lobby,scrimChannel){
-  if(lobby.status!=="open")return false;
-  if(lobby.teamA.length+lobby.teamB.length<6)return false;
-  const u=scrimUnixSeconds(lobby);
-  if(!u)return false;
-  if(Math.floor(Date.now()/1000)<u)return false;
-  lobby.status="validated";
-  await saveScrim();
-  if(scrimChannel)await updateScrimLobbyMessage(scrimChannel,lobby);
-  // Ping the 6 players with a short "session is live" announcement in #general-scrim-chat if it exists
-  const guild=scrimChannel?.guild;
-  if(guild){
-    const genCh=guild.channels.cache.find(c=>c.name==="general-scrim-chat"&&c.isTextBased());
-    if(genCh){
-      const all=[...lobby.teamA,...lobby.teamB];
-      const embed=new EmbedBuilder().setTitle(`🎯  Scrim #${lobby.id} — Session starting!`).setColor(0x57F287)
-        .setDescription(`📅 ${scrimTimestampStr(lobby)}\n\n**🔵 Team 1:**\n${lobby.teamA.map(id=>`<@${id}>`).join("\n")}\n\n**🔴 Team 2:**\n${lobby.teamB.map(id=>`<@${id}>`).join("\n")}`)
-        .setTimestamp();
-      await genCh.send({content:all.map(id=>`<@${id}>`).join(" "),embeds:[embed],allowedMentions:{users:all}}).catch(()=>{});
-    }
-  }
-  return true;
-}
 
 // ─── SCRIM HISTORY EMBED & BUTTONS ───────────────────────────────────
 function scrimHistoryEmbed(lobby){
-  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 ${scrimTimestampStr(lobby)}`:"📅 *No date/time*";
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${lobby.timeStr}**`:"📅 *No date/time*";
   const drafts=(lobby.drafts||[]).length>0?(lobby.drafts||[]).map((u,i)=>`[Draft ${i+1}](${u})`).join(" • "):"*No draft uploaded*";
   const replays=(lobby.replays||[]).length>0?`${(lobby.replays||[]).length} replay(s) available`:"*No replay uploaded*";
   const e=new EmbedBuilder().setTitle(`🏁  Scrim #${lobby.id} — Recap`).setColor(0x57F287)
@@ -603,18 +521,10 @@ function scrimHistoryEmbed(lobby){
   return e;
 }
 function scrimHistoryBtns(lobby){
-  const rows=[];
-  const row1=new ActionRowBuilder();
-  const replayCount=(lobby.replays||[]).length;
-  // Add Replay button (next slot) if under 5
-  if(replayCount<5)row1.addComponents(new ButtonBuilder().setCustomId(`scrim_${lobby.id}_addreplay`).setLabel(`➕ Add Replay ${replayCount+1}`).setStyle(ButtonStyle.Primary));
-  if(row1.components.length>0)rows.push(row1);
-  // Upload draft button
-  const row2=new ActionRowBuilder().addComponents(
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`scrim_${lobby.id}_addreplay`).setLabel("➕ Add Replay").setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`scrim_${lobby.id}_uploaddraft`).setLabel(`📸 Upload Draft ${(lobby.drafts||[]).length+1}`).setStyle(ButtonStyle.Secondary)
-  );
-  rows.push(row2);
-  return rows;
+  )];
 }
 
 function queueEmbed(isPro){
@@ -809,8 +719,6 @@ async function startLobby(channel,lobbyId,isPro=false){
   for(const id of lobby.expected)await removeRole(guild,id,inQueueRole);
   await refreshQueue(channel,isPro,false).catch(()=>{});
   lobby.lobbyPingMsg=await channel.send({content:`🎮 **${isPro?"Pro ":""}Lobby #${lobbyId} — Queue full!** ${lobby.expected.map(id=>`<@${id}>`).join(" ")}\nJoin voice channel **🔊 ${isPro?"PRO ":""}LOBBY #${lobbyId} — JOIN** to start the match.`,allowedMentions:{users:lobby.expected}}).catch(()=>null);
-  // Repush queue below the lobby ping so it stays visible at the bottom
-  await repushQueue(channel,isPro,allSlotsActive(lm)).catch(()=>{});
   for(const id of lobby.expected){const mb=await guild.members.fetch(id).catch(()=>null);if(mb)await mb.send(`🎮 **${isPro?"Pro ":""}Lobby #${lobbyId} is ready!** Join the voice channel to start.`).catch(()=>{});}
   // Create lobby voice — pro: only Pro role can see
   const voicePerms=isPro?[
@@ -1003,10 +911,6 @@ async function finishMatch(lobby,winner){
     if(!lobby.isPro){for(const id of betW){if(stats[id].betStreak===5)await genCh.send({embeds:[new EmbedBuilder().setTitle("🔮  THE ORACLE").setColor(0x9B59B6).setDescription(`<@${id}> has predicted **5 matches correctly** in a row!`)]}).catch(()=>{});}}
   }
   await cleanupLobby(lobby);
-  // Repush queue to bottom of queue channel (result embed + announcements pushed it up)
-  const qChName=lobby.isPro?"queue-elb-pro":"queue-lobby-elo";
-  const qCh=guild.channels.cache.find(c=>c.name===qChName&&c.isTextBased());
-  if(qCh){const lm2=lobby.isPro?proLobbies:lobbies;await repushQueue(qCh,lobby.isPro,allSlotsActive(lm2)).catch(()=>{});}
 }
 
 // ─── CANCEL / CLEANUP ────────────────────────────────────────────────
@@ -1035,22 +939,30 @@ async function cleanupLobby(lobby){
   if(ch){await refreshQueue(ch,lobby.isPro,false).catch(()=>{});tryStartLobby(ch,lobby.isPro);}
 }
 
+// ─── QUEUE AUTO-REPUSH (triggered by any message in queue channels) ──
+client.on("messageCreate",async msg=>{
+  try{
+    if(msg.channel.name!=="queue-elb-pro"&&msg.channel.name!=="queue-lobby-elo")return;
+    const isProCh=msg.channel.name==="queue-elb-pro";
+    const msgs=isProCh?proQueueMessages:queueMessages;
+    // Don't repush if THIS message IS the queue message itself
+    if(msgs[msg.channel.id]&&msgs[msg.channel.id].id===msg.id)return;
+    // Delay to let any concurrent refreshQueue finish
+    setTimeout(async()=>{
+      try{
+        const lm=isProCh?proLobbies:lobbies;
+        await repushQueue(msg.channel,isProCh,allSlotsActive(lm));
+      }catch(e){log("ERROR","auto-repush:",e);}
+    },1500);
+  }catch(e){log("ERROR","auto-repush handler:",e);}
+});
+
 // ─── COMMANDS ────────────────────────────────────────────────────────
 client.on("messageCreate",async msg=>{try{
   if(msg.author.bot)return;
   const content=msg.content.trim();
   const isPro=content.endsWith(" pro");
   const base=isPro?content.slice(0,-4).trim():content;
-
-  // Repush queue messages to bottom when any user message arrives in queue channels
-  // This ensures the queue stays visible at the bottom of the channel
-  if(msg.channel.name==="queue-elb-pro"||msg.channel.name==="queue-lobby-elo"){
-    const isProCh=msg.channel.name==="queue-elb-pro";
-    // Only repush if there's an active queue message AND we're not handling a bot command that updates it anyway
-    setTimeout(async()=>{
-      try{const lm=isProCh?proLobbies:lobbies;await repushQueue(msg.channel,isProCh,allSlotsActive(lm));}catch(e){log("ERROR","auto-repush:",e);}
-    },1500);
-  }
 
   // ── !queue ──
   if(base==="!queue"){
@@ -1065,9 +977,7 @@ client.on("messageCreate",async msg=>{try{
       if(isPro){const member=await msg.guild.members.fetch(userId).catch(()=>null);if(!member||!member.roles.cache.some(r=>r.name==="Pro")){if(isPro)_proQueueLock=false;return;}}
       const qCh=msg.guild.channels.cache.find(c=>c.name===m.qCh&&c.isTextBased());
       const isQCh=qCh&&msg.channel.id===qCh.id;
-      const placementInQ=isPro?q.filter(id=>placementPlayers.has(id)).length:0;
-      const dodgedInQ=isPro?q.filter(id=>getDodgeCount(id)>0).length:0;
-      const maxSlots=isPro?6+placementInQ+dodgedInQ:6;
+      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
       if(!allSlotsActive(lm)&&!q.includes(userId)&&!findLobbyByPlayer(userId)&&!findLobbyByExpected(userId)&&!bannedPlayers.has(userId)&&q.length<maxSlots){
         m.ensure(userId);q.push(userId);await addRole(msg.guild,userId,inQueueRole);
         if(isPro)proQueueJoinTime[userId]=Date.now();
@@ -1131,34 +1041,24 @@ client.on("messageCreate",async msg=>{try{
 
   // ── !dodge / !undodge / !mydodge (Pro only — any player) ──
   if(content.startsWith("!dodge")&&!content.startsWith("!dodgeclear")){
-    const discreet=async(text,ok=true)=>{
-      await msg.delete().catch(()=>{});
-      const r=await msg.channel.send(`${ok?"":"❌ "}${text}`).catch(()=>null);
-      if(r)setTimeout(()=>r.delete().catch(()=>{}),ok?4000:6000);
-    };
-    const u=msg.mentions.users.first();if(!u)return discreet("Usage: `!dodge @player`",false);
-    if(u.id===DODGE_PROTECTED_ID)return discreet("You cannot dodge this player.",false);
-    if(u.id===msg.author.id)return discreet("You cannot dodge yourself.",false);
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!dodge @player`");
+    if(u.id===DODGE_PROTECTED_ID)return msg.reply("❌ You cannot dodge this player.");
+    if(u.id===msg.author.id)return msg.reply("❌ You cannot dodge yourself.");
     const uid=msg.author.id;
     if(!dodges[uid])dodges[uid]=[];
-    if(dodges[uid].includes(u.id))return discreet(`<@${u.id}> is already in your dodge list.`,false);
+    if(dodges[uid].includes(u.id))return msg.reply(`❌ <@${u.id}> is already in your dodge list.`);
     dodges[uid].push(u.id);await saveDodges();
-    await discreet(`🚫 <@${u.id}> added to your dodge list.`,true);
+    await msg.reply(`🚫 <@${u.id}> has been added to your **dodge list** (Pro only). Matches won't pop with both of you in queue.`);
     return;
   }
   if(content.startsWith("!undodge")){
-    const discreet=async(text,ok=true)=>{
-      await msg.delete().catch(()=>{});
-      const r=await msg.channel.send(`${ok?"":"❌ "}${text}`).catch(()=>null);
-      if(r)setTimeout(()=>r.delete().catch(()=>{}),ok?4000:6000);
-    };
-    const u=msg.mentions.users.first();if(!u)return discreet("Usage: `!undodge @player`",false);
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!undodge @player`");
     const uid=msg.author.id;
-    if(!dodges[uid]||!dodges[uid].includes(u.id))return discreet("This player is not in your dodge list.",false);
+    if(!dodges[uid]||!dodges[uid].includes(u.id))return msg.reply("❌ This player is not in your dodge list.");
     dodges[uid]=dodges[uid].filter(id=>id!==u.id);
     if(dodges[uid].length===0)delete dodges[uid];
     await saveDodges();
-    await discreet(`✅ <@${u.id}> removed from your dodge list.`,true);
+    await msg.reply(`✅ <@${u.id}> removed from your dodge list.`);
     return;
   }
   if(content==="!mydodge"){
@@ -1181,7 +1081,7 @@ client.on("messageCreate",async msg=>{try{
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n`!command` — Buttons menu for all commands\n\n"+
     "**Pro Dodge (anyone):**\n`!dodge @player` — Don't match with this player in Pro\n`!undodge @player` — Remove from dodge list\n`!mydodge` — Show your dodge list\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
-    "**Scrim:**\n`!scrim` — Create a new scrim lobby (anyone)\n`!signup @player t1|t2 <id>` — Add a player to a team (lobby admin/captain/Ray/admin)\n`!captainscrim @player <id>` — Assign a scrim captain (lobby admin/Ray/admin)\n`!removescrim <id> @player` — Remove a player (lobby admin/captain/Ray/admin)\n`!cancelscrim <id>` — Cancel and delete a scrim (lobby admin/captain/Ray/admin)\n`!draft <id>` (with image attached) — Upload a draft screenshot"
+    "**Scrim (Ray + Admin + Lobby Admin):**\n`!scrim` — Create a new scrim lobby\n`!removescrim <id> @player` — Remove a player from a scrim\n`!cancelscrim <id>` — Cancel and delete a scrim\n`!draft <id>` (with image attached) — Upload a draft screenshot"
   )]});return;}
 
   // ── !command — buttons menu (ephemeral) ──
@@ -1211,8 +1111,9 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
-  // ── !scrim (anyone) — creates a scrim lobby ──
+  // ── !scrim (Ray + Admin) — shows create scrim hub if no active lobbies ──
   if(content==="!scrim"){
+    if(msg.author.id!==RAY_ID&&!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Only Ray or admins can use this.");
     const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
     if(!ch)return msg.reply("❌ Channel #ray-scrim-queue not found.");
     if(activeScrims().length>=MAX_SCRIM_LOBBIES)return msg.reply(`❌ Max ${MAX_SCRIM_LOBBIES} active scrim lobbies reached.`);
@@ -1224,7 +1125,8 @@ client.on("messageCreate",async msg=>{try{
     if(role&&member)await member.roles.add(role).catch(()=>{});
     const newLobby={
       id:lobbyId,creatorId:uid,roleId:role?.id??null,dateStr:null,timeStr:null,
-      teamA:[],teamB:[],captains:[],
+      teamA:[],teamB:[],confirmed:[],declined:[],
+      validationSent:false,validationPingedAt:null,pendingPings:{},
       messageId:null,status:"open",replays:[],drafts:[],historyMsgId:null,createdAt:Date.now()
     };
     scrim.lobbies.push(newLobby);
@@ -1241,13 +1143,12 @@ client.on("messageCreate",async msg=>{try{
     const parts=content.split(/\s+/);if(parts.length<2)return msg.reply("Usage: `!removescrim <lobbyId> @player`");
     const lobbyId=parts[1].toUpperCase();
     const lobby=findScrim(lobbyId);if(!lobby)return msg.reply("❌ Scrim lobby not found.");
-    const isAuth=isScrimAuthorized(msg.author.id,lobby);
-    if(!isAuth)return msg.reply("❌ Only Ray, admins, the lobby admin, or a scrim captain can use this.");
+    const isAuth=msg.author.id===RAY_ID||ADMIN_IDS.includes(msg.author.id)||msg.author.id===lobby.creatorId;
+    if(!isAuth)return msg.reply("❌ Only Ray, admins, or the lobby admin can use this.");
     const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!removescrim <lobbyId> @player`");
     lobby.teamA=lobby.teamA.filter(id=>id!==u.id);lobby.teamB=lobby.teamB.filter(id=>id!==u.id);
-    if(Array.isArray(lobby.confirmed))lobby.confirmed=lobby.confirmed.filter(id=>id!==u.id);
-    if(Array.isArray(lobby.declined))lobby.declined=lobby.declined.filter(id=>id!==u.id);
-    if(lobby.pendingPings&&typeof lobby.pendingPings==="object")delete lobby.pendingPings[u.id];
+    lobby.confirmed=lobby.confirmed.filter(id=>id!==u.id);lobby.declined=lobby.declined.filter(id=>id!==u.id);
+    delete lobby.pendingPings[u.id];
     await saveScrim();
     const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
     if(ch)await updateScrimLobbyMessage(ch,lobby);
@@ -1260,109 +1161,18 @@ client.on("messageCreate",async msg=>{try{
     const parts=content.split(/\s+/);if(parts.length<2)return msg.reply("Usage: `!cancelscrim <lobbyId>`");
     const lobbyId=parts[1].toUpperCase();
     const lobby=findScrim(lobbyId);if(!lobby)return msg.reply("❌ Scrim lobby not found.");
-    const isAuth=isScrimAuthorized(msg.author.id,lobby);
-    if(!isAuth)return msg.reply("❌ Only Ray, admins, the lobby admin, or a scrim captain can use this.");
+    const isAuth=msg.author.id===RAY_ID||ADMIN_IDS.includes(msg.author.id)||msg.author.id===lobby.creatorId;
+    if(!isAuth)return msg.reply("❌ Only Ray, admins, or the lobby admin can use this.");
+    // Delete message
     const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
-    // Delete lobby message
     if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});}
     // Delete role
     if(lobby.roleId){const r=msg.guild.roles.cache.get(lobby.roleId);if(r)await r.delete().catch(()=>{});}
     // Remove lobby from state
     scrim.lobbies=scrim.lobbies.filter(l=>l.id!==lobby.id);
     await saveScrim();
-    // Clean #ray-scrim-queue — keep only the SCRIM HUB + messages of other active lobbies
-    if(ch){
-      const keepIds=new Set();
-      if(scrim.createBtnMsgId)keepIds.add(scrim.createBtnMsgId);
-      for(const l of scrim.lobbies){if(l.messageId)keepIds.add(l.messageId);}
-      const allMsgs=await ch.messages.fetch({limit:100}).catch(()=>null);
-      if(allMsgs){for(const[,m] of allMsgs){if(!keepIds.has(m.id))await m.delete().catch(()=>{});}}
-      await refreshCreateScrimBtn(ch);
-    }
-    // If the command was typed in ray-scrim-queue, the cleanup above already deleted msg — skip confirmation there.
-    // Otherwise, remove the user's command and send a discreet confirmation that auto-deletes after 5s.
-    if(!ch||msg.channel.id!==ch.id){
-      await msg.delete().catch(()=>{});
-      const reply=await msg.channel.send(`⚠️ Scrim **#${lobby.id}** cancelled.`).catch(()=>null);
-      if(reply)setTimeout(()=>reply.delete().catch(()=>{}),5000);
-    }
-    // DM the lobby admin so they always know it happened
-    const creator=await msg.guild.members.fetch(lobby.creatorId).catch(()=>null);
-    if(creator&&creator.id!==msg.author.id)await creator.send(`⚠️ Your scrim **#${lobby.id}** was cancelled by <@${msg.author.id}>.`).catch(()=>{});
-    return;
-  }
-
-  // ── !captainscrim @player <lobbyId> (lobby admin + server admins) ──
-  if(content.startsWith("!captainscrim")){
-    const parts=content.split(/\s+/);
-    if(parts.length<3)return msg.reply("Usage: `!captainscrim @player <lobbyId>`");
-    const target=msg.mentions.users.first();
-    if(!target)return msg.reply("Usage: `!captainscrim @player <lobbyId>` — mention a player.");
-    // The lobby ID is the last arg that isn't a mention
-    const lobbyId=parts[parts.length-1].toUpperCase();
-    const lobby=findScrim(lobbyId);
-    if(!lobby)return msg.reply("❌ Scrim lobby not found.");
-    // Auth: only the lobby admin (creator) + server admins (NOT existing captains — keeps control with original admin)
-    const isAuth=msg.author.id===RAY_ID||ADMIN_IDS.includes(msg.author.id)||msg.author.id===lobby.creatorId;
-    if(!isAuth)return msg.reply("❌ Only the lobby admin, Ray or admins can assign a scrim captain.");
-    if(target.bot)return msg.reply("❌ Can't assign a bot as captain.");
-    if(target.id===lobby.creatorId)return msg.reply("ℹ️ That player is already the lobby admin.");
-    if(!Array.isArray(lobby.captains))lobby.captains=[];
-    if(lobby.captains.includes(target.id))return msg.reply(`ℹ️ <@${target.id}> is already a captain of scrim **#${lobby.id}**.`);
-    lobby.captains.push(target.id);
-    // Give them the "Admin Lobby #<id>" role if it exists, so they can see any admin-restricted channels
-    if(lobby.roleId){
-      const role=msg.guild.roles.cache.get(lobby.roleId);
-      const member=await msg.guild.members.fetch(target.id).catch(()=>null);
-      if(role&&member)await member.roles.add(role).catch(()=>{});
-    }
-    await saveScrim();
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
-    if(ch)await updateScrimLobbyMessage(ch,lobby);
-    await msg.channel.send(`👑 <@${target.id}> is now a captain of scrim **#${lobby.id}** — they can signup players, edit date/time, manage the lobby.`);
-    // Notify the new captain via DM
-    const m=await msg.guild.members.fetch(target.id).catch(()=>null);
-    if(m)await m.send(`👑 You are now a captain of scrim **#${lobby.id}**. You can use \`!signup\`, \`!removescrim\`, \`!cancelscrim\`, edit the date/time, and upload drafts/replays.`).catch(()=>{});
-    return;
-  }
-
-  // ── !signup @player t1|t2 <lobbyId> (lobby admin + captains + server admins) ──
-  if(content.startsWith("!signup")){
-    // Helper: send short confirmation that auto-deletes; error message if the action didn't go through
-    const discreet=async(text,ok=true)=>{
-      await msg.delete().catch(()=>{});
-      const r=await msg.channel.send(`${ok?"":"❌ "}${text}`).catch(()=>null);
-      if(r)setTimeout(()=>r.delete().catch(()=>{}),ok?4000:6000);
-    };
-    const parts=content.split(/\s+/);
-    if(parts.length<4)return discreet("Usage: `!signup @player t1|t2 <lobbyId>`",false);
-    const target=msg.mentions.users.first();
-    if(!target)return discreet("Usage: `!signup @player t1|t2 <lobbyId>` — mention a player.",false);
-    let teamArg=null,lobbyId=null;
-    for(const p of parts.slice(1)){
-      const low=p.toLowerCase();
-      if(low==="t1"||low==="t2")teamArg=low;
-      else if(/^[0-9A-Fa-f]{4}$/.test(p))lobbyId=p.toUpperCase();
-    }
-    if(!teamArg)return discreet("Specify the team: `t1` or `t2`.",false);
-    if(!lobbyId)return discreet("Specify the lobby ID (e.g. `5CB0`).",false);
-    const lobby=findScrim(lobbyId);
-    if(!lobby)return discreet("Scrim lobby not found.",false);
-    const isAuth=isScrimAuthorized(msg.author.id,lobby);
-    if(!isAuth)return discreet("Only the lobby admin, a scrim captain, Ray or admins can use this.",false);
-    if(lobby.status!=="open")return discreet("This scrim is not accepting new players.",false);
-    if(target.bot)return discreet("Can't signup a bot.",false);
-    if(lobby.teamA.includes(target.id)||lobby.teamB.includes(target.id))return discreet(`<@${target.id}> is already in this scrim.`,false);
-    const team=teamArg==="t1"?lobby.teamA:lobby.teamB;
-    const teamLabel=teamArg==="t1"?"Team 1":"Team 2";
-    if(team.length>=3)return discreet(`${teamLabel} is full.`,false);
-    team.push(target.id);
-    await saveScrim();
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
-    if(ch)await updateScrimLobbyMessage(ch,lobby);
-    // Auto-validate if this join makes the lobby 6/6 AND the scheduled time has already passed
-    await maybeAutoValidate(lobby,ch);
-    await discreet(`<@${target.id}> added to ${teamLabel} of scrim **#${lobby.id}**.`,true);
+    if(ch)await refreshCreateScrimBtn(ch);
+    await msg.channel.send(`⚠️ Scrim **#${lobby.id}** cancelled and deleted.`);
     return;
   }
 
@@ -1372,14 +1182,18 @@ client.on("messageCreate",async msg=>{try{
     const lobbyId=parts[1].toUpperCase();
     const lobby=findScrim(lobbyId);if(!lobby)return msg.reply("❌ Scrim lobby not found.");
     const uid=msg.author.id;
-    const isAuth=isScrimAuthorized(uid,lobby)||lobby.teamA.includes(uid)||lobby.teamB.includes(uid);
+    const isAuth=uid===RAY_ID||ADMIN_IDS.includes(uid)||uid===lobby.creatorId||lobby.teamA.includes(uid)||lobby.teamB.includes(uid);
     if(!isAuth)return msg.reply("❌ Only players of this scrim can upload drafts.");
     const attachment=msg.attachments.first();
     if(!attachment||!attachment.contentType?.startsWith("image/"))return msg.reply("❌ Attach an image.");
     if(!lobby.drafts)lobby.drafts=[];
     lobby.drafts.push(attachment.url);
     await saveScrim();
-    // Update history message if archived
+    // Update live scrim message (if status=validated) AND history message (if archived)
+    if(lobby.messageId&&lobby.status!=="archived"){
+      const scrimCh=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+      if(scrimCh)await updateScrimLobbyMessage(scrimCh,lobby);
+    }
     if(lobby.historyMsgId){
       const histCh=msg.guild.channels.cache.find(c=>c.name==="history-scrim"&&c.isTextBased());
       if(histCh){const m=await histCh.messages.fetch(lobby.historyMsgId).catch(()=>null);if(m)await m.edit({embeds:[scrimHistoryEmbed(lobby)],components:scrimHistoryBtns(lobby)}).catch(()=>{});}
@@ -1549,38 +1363,17 @@ client.on("interactionCreate",async interaction=>{try{
       const lobbyId=cid.replace("scrim_setdate_","");
       const lobby=findScrim(lobbyId);if(!lobby)return interaction.reply({content:"❌ Lobby not found.",ephemeral:true});
       const uid=interaction.user.id;
-      const isAuth=isScrimAuthorized(uid,lobby);
-      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, a scrim captain, Ray or admins can edit.",ephemeral:true});
+      const isAuth=uid===RAY_ID||ADMIN_IDS.includes(uid)||uid===lobby.creatorId;
+      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, Ray or admins can edit.",ephemeral:true});
       const dateStr=interaction.fields.getTextInputValue("date").trim();
-      const timeRaw=interaction.fields.getTextInputValue("time").trim();
+      const timeStr=interaction.fields.getTextInputValue("time").trim();
       if(!/^\d{1,2}\/\d{1,2}$/.test(dateStr))return interaction.reply({content:"❌ Date format: DD/MM (e.g. 28/04).",ephemeral:true});
-      const timeStr=parseTimeInput(timeRaw);
-      if(!timeStr)return interaction.reply({content:"❌ Time format: `8:30 PM` or `20:30`.",ephemeral:true});
+      if(!/^\d{1,2}:\d{2}$/.test(timeStr))return interaction.reply({content:"❌ Time format: HH:MM (e.g. 20:30).",ephemeral:true});
       lobby.dateStr=dateStr;lobby.timeStr=timeStr;
       await saveScrim();
       const ch=interaction.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
       if(ch)await updateScrimLobbyMessage(ch,lobby);
-      // If the scrim is already 6/6 and the newly-set time is in the past → auto-validate immediately
-      await maybeAutoValidate(lobby,ch);
-      await interaction.reply({content:`✅ Date/time set to ${scrimTimestampStr(lobby)}.`,ephemeral:true});
-      return;
-    }
-    // Scrim replay modal
-    if(cid.startsWith("scrim_replay_")){
-      const lobbyId=cid.replace("scrim_replay_","");
-      const lobby=findScrim(lobbyId);if(!lobby)return interaction.reply({content:"❌ Lobby not found.",ephemeral:true});
-      const uid=interaction.user.id;
-      const isAuth=isScrimAuthorized(uid,lobby);
-      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, a scrim captain, Ray or admins can add replays.",ephemeral:true});
-      if((lobby.replays||[]).length>=5)return interaction.reply({content:"❌ Max 5 replays reached.",ephemeral:true});
-      const url=interaction.fields.getTextInputValue("replay_url").trim();
-      if(!/^https?:\/\//.test(url))return interaction.reply({content:"❌ Invalid URL (must start with http:// or https://).",ephemeral:true});
-      if(!lobby.replays)lobby.replays=[];
-      lobby.replays.push(url);await saveScrim();
-      // Update archived message if exists
-      const histCh=interaction.guild.channels.cache.find(c=>c.name==="history-scrim"&&c.isTextBased());
-      if(histCh&&lobby.historyMsgId){const m=await histCh.messages.fetch(lobby.historyMsgId).catch(()=>null);if(m)await m.edit({embeds:[scrimHistoryEmbed(lobby)],components:scrimHistoryBtns(lobby)}).catch(()=>{});}
-      await interaction.reply({content:`✅ Replay #${lobby.replays.length} added!`,ephemeral:true});
+      await interaction.reply({content:`✅ Date/time set to **${dateStr} — ${timeStr}**.`,ephemeral:true});
       return;
     }
     // !command modals
@@ -1707,7 +1500,8 @@ client.on("interactionCreate",async interaction=>{try{
     if(role&&member)await member.roles.add(role).catch(()=>{});
     const newLobby={
       id:lobbyId,creatorId:uid,roleId:role?.id??null,dateStr:null,timeStr:null,
-      teamA:[],teamB:[],captains:[],
+      teamA:[],teamB:[],confirmed:[],declined:[],
+      validationSent:false,validationPingedAt:null,pendingPings:{},
       messageId:null,status:"open",replays:[],drafts:[],historyMsgId:null,createdAt:Date.now()
     };
     scrim.lobbies.push(newLobby);
@@ -1729,19 +1523,45 @@ client.on("interactionCreate",async interaction=>{try{
 
     // Set date/time (open modal)
     if(action==="setdate"){
-      const isAuth=isScrimAuthorized(uid,lobby);
-      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, a scrim captain, Ray or admins can edit.",ephemeral:true});
+      const isAuth=uid===RAY_ID||ADMIN_IDS.includes(uid)||uid===lobby.creatorId;
+      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, Ray or admins can edit.",ephemeral:true});
       const modal=new ModalBuilder().setCustomId(`scrim_setdate_${lobby.id}`).setTitle(`Set date/time — Scrim #${lobby.id}`);
       const dateInput=new TextInputBuilder().setCustomId("date").setLabel("Date (DD/MM)").setStyle(TextInputStyle.Short).setPlaceholder("28/04").setRequired(true).setValue(lobby.dateStr||"");
-      const timeInput=new TextInputBuilder().setCustomId("time").setLabel("Time (Paris time)").setStyle(TextInputStyle.Short).setPlaceholder("8:30 PM or 20:30").setRequired(true).setValue(lobby.timeStr?formatTime12h(lobby.timeStr):"");
+      const timeInput=new TextInputBuilder().setCustomId("time").setLabel("Time (HH:MM, Paris time)").setStyle(TextInputStyle.Short).setPlaceholder("20:30").setRequired(true).setValue(lobby.timeStr||"");
       modal.addComponents(new ActionRowBuilder().addComponents(dateInput),new ActionRowBuilder().addComponents(timeInput));
       await interaction.showModal(modal);
       return;
     }
 
-    // Legacy accept/decline buttons from older scrims — auto-validation replaces this, buttons are no-ops.
+    // Accept/decline validation
     if(action==="accept"||action==="decline"){
-      return interaction.reply({content:"ℹ️ Presence validation was removed — the scrim now starts automatically when 6 players are signed up and the scheduled time has arrived.",ephemeral:true});
+      if(!lobby.teamA.includes(uid)&&!lobby.teamB.includes(uid))return interaction.reply({content:"❌ You are not in this scrim.",ephemeral:true});
+      if(action==="accept"){
+        if(lobby.confirmed.includes(uid))return interaction.reply({content:"✅ Already confirmed.",ephemeral:true});
+        lobby.confirmed.push(uid);lobby.declined=lobby.declined.filter(id=>id!==uid);delete lobby.pendingPings[uid];
+        await saveScrim();
+        if(ch)await updateScrimLobbyMessage(ch,lobby);
+        await interaction.reply({content:`✅ Presence confirmed for **Scrim #${lobby.id}**!`,ephemeral:true});
+        // Check if all 6 confirmed
+        if(lobby.confirmed.length===6){
+          lobby.status="validated";
+          const genCh=interaction.guild.channels.cache.find(c=>c.name==="general-scrim-chat"&&c.isTextBased());
+          if(genCh){
+            const recap=new EmbedBuilder().setTitle(`🎯  Scrim #${lobby.id} — All Confirmed!`).setColor(0x57F287)
+              .setDescription(`📅 **${lobby.dateStr||"?"} — ${lobby.timeStr||"?"}**\n\n**🔵 Team 1:**\n${lobby.teamA.map(id=>`<@${id}>`).join("\n")}\n\n**🔴 Team 2:**\n${lobby.teamB.map(id=>`<@${id}>`).join("\n")}\n\n*Communicate with each other to agree on the time!*`)
+              .setTimestamp();
+            await genCh.send({content:`${lobby.teamA.concat(lobby.teamB).map(id=>`<@${id}>`).join(" ")}`,embeds:[recap],allowedMentions:{users:lobby.teamA.concat(lobby.teamB)}}).catch(()=>{});
+          }
+          await saveScrim();
+          if(ch)await updateScrimLobbyMessage(ch,lobby);
+        }
+      }else{
+        lobby.declined.push(uid);lobby.teamA=lobby.teamA.filter(id=>id!==uid);lobby.teamB=lobby.teamB.filter(id=>id!==uid);delete lobby.pendingPings[uid];
+        await saveScrim();
+        if(ch)await updateScrimLobbyMessage(ch,lobby);
+        await interaction.reply({content:`❌ You declined — your slot is now open.`,ephemeral:true});
+      }
+      return;
     }
 
     // End session (any of the 6 players)
@@ -1749,8 +1569,8 @@ client.on("interactionCreate",async interaction=>{try{
       if(lobby.status!=="validated")return interaction.reply({content:"❌ Can only end a validated scrim.",ephemeral:true});
       if(!lobby.teamA.includes(uid)&&!lobby.teamB.includes(uid))return interaction.reply({content:"❌ Only players in the scrim can end the session.",ephemeral:true});
       lobby.status="archived";lobby.archivedAt=Date.now();scrim.archivedCount++;
-      // Edit original message to show archived
-      if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m){const archEmbed=new EmbedBuilder().setTitle(`🎯  SCRIM #${lobby.id} — ARCHIVED`).setColor(0x95A5A6).setDescription(`📅 ${scrimTimestampStr(lobby)}\n\nThis scrim session has ended. See #history-scrim for the recap.`);await m.edit({embeds:[archEmbed],components:[]}).catch(()=>{});}}
+      // DELETE the message from #ray-scrim-queue (no ARCHIVED message there)
+      if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});lobby.messageId=null;}
       // Post in history-scrim with screenshots/replays buttons
       const histCh=interaction.guild.channels.cache.find(c=>c.name==="history-scrim"&&c.isTextBased());
       if(histCh){
@@ -1764,20 +1584,14 @@ client.on("interactionCreate",async interaction=>{try{
 
     // Add replay (opens modal)
     if(action==="addreplay"){
-      const isAuth=isScrimAuthorized(uid,lobby);
-      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin, a scrim captain, Ray or admins can add replays.",ephemeral:true});
-      if((lobby.replays||[]).length>=5)return interaction.reply({content:"❌ Max 5 replays reached.",ephemeral:true});
-      const modal=new ModalBuilder().setCustomId(`scrim_replay_${lobby.id}`).setTitle(`Add replay — Scrim #${lobby.id}`);
-      const input=new TextInputBuilder().setCustomId("replay_url").setLabel("Google Drive / file share URL").setStyle(TextInputStyle.Short).setPlaceholder("https://drive.google.com/...").setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      await interaction.showModal(modal);
+      await interaction.reply({content:"📤 Upload your replay here: https://forms.gle/8mLCHimQJEdaZErR6",ephemeral:true});
       return;
     }
 
     // Watch replay — send ephemeral link
     // Upload draft = button that tells admin to just paste an image in chat
     if(action==="uploaddraft"){
-      const isAuth=isScrimAuthorized(uid,lobby)||lobby.teamA.includes(uid)||lobby.teamB.includes(uid);
+      const isAuth=uid===RAY_ID||ADMIN_IDS.includes(uid)||uid===lobby.creatorId||lobby.teamA.includes(uid)||lobby.teamB.includes(uid);
       if(!isAuth)return interaction.reply({content:"❌ Only players of this scrim can upload drafts.",ephemeral:true});
       await interaction.reply({content:`📸 To upload a draft screenshot for Scrim **#${lobby.id}**, paste the image directly in this channel with \`!draft ${lobby.id}\` as the message text. The bot will register it automatically.`,ephemeral:true});
       return;
@@ -1790,7 +1604,6 @@ client.on("interactionCreate",async interaction=>{try{
       if(lobby.teamA.length>=3)return interaction.reply({content:"❌ Team 1 is full.",ephemeral:true});
       lobby.teamA.push(uid);await saveScrim();
       if(ch)await updateScrimLobbyMessage(ch,lobby);
-      await maybeAutoValidate(lobby,ch);
       await interaction.reply({content:`✅ Joined **Team 1** of Scrim #${lobby.id}!`,ephemeral:true});return;
     }
     if(action==="joinB"){
@@ -1799,15 +1612,13 @@ client.on("interactionCreate",async interaction=>{try{
       if(lobby.teamB.length>=3)return interaction.reply({content:"❌ Team 2 is full.",ephemeral:true});
       lobby.teamB.push(uid);await saveScrim();
       if(ch)await updateScrimLobbyMessage(ch,lobby);
-      await maybeAutoValidate(lobby,ch);
       await interaction.reply({content:`✅ Joined **Team 2** of Scrim #${lobby.id}!`,ephemeral:true});return;
     }
     if(action==="leave"){
       if(!lobby.teamA.includes(uid)&&!lobby.teamB.includes(uid))return interaction.reply({content:"❌ You are not in this scrim.",ephemeral:true});
       lobby.teamA=lobby.teamA.filter(id=>id!==uid);lobby.teamB=lobby.teamB.filter(id=>id!==uid);
-      if(Array.isArray(lobby.confirmed))lobby.confirmed=lobby.confirmed.filter(id=>id!==uid);
-      if(Array.isArray(lobby.declined))lobby.declined=lobby.declined.filter(id=>id!==uid);
-      if(lobby.pendingPings&&typeof lobby.pendingPings==="object")delete lobby.pendingPings[uid];
+      lobby.confirmed=lobby.confirmed.filter(id=>id!==uid);lobby.declined=lobby.declined.filter(id=>id!==uid);
+      delete lobby.pendingPings[uid];
       await saveScrim();
       if(ch)await updateScrimLobbyMessage(ch,lobby);
       await interaction.reply({content:`❌ Left Scrim #${lobby.id}.`,ephemeral:true});return;
@@ -1830,10 +1641,8 @@ client.on("interactionCreate",async interaction=>{try{
       if(bannedPlayers.has(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ You are banned.",ephemeral:true});}
       if(findLobbyByPlayer(interaction.user.id)||findLobbyByExpected(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ Already in a match.",ephemeral:true});}
       if(q.includes(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Already in queue.",ephemeral:true});}
-      // Queue full check — formula matches queueEmbed: 6 + placements + dodgers (pro only)
-      const placementInQ=isPro?q.filter(id=>placementPlayers.has(id)).length:0;
-      const dodgedInQ=isPro?q.filter(id=>getDodgeCount(id)>0).length:0;
-      const maxSlots=isPro?6+placementInQ+dodgedInQ:6;
+      // Queue full check — pro allows 7 if placements in queue
+      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
       if(q.length>=maxSlots){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
       q.push(interaction.user.id);await addRole(interaction.guild,interaction.user.id,inQueueRole);
       if(isPro)proQueueJoinTime[interaction.user.id]=Date.now();
@@ -2009,19 +1818,90 @@ client.once("ready",async()=>{
     log("INFO",`Removed ${toRemove.length} inactive players from pro queue after 1h`);
   },60_000);
 
-  // ── Scrim auto-validation cron: transition open lobbies to "validated" when 6/6 AND time reached ──
+  // ── Scrim validation cron (CET timezone, per-lobby based on dateStr/timeStr) ──
   setInterval(async()=>{
+    const now=new Date();
     const nowMs=Date.now();
+    // Get current Paris date (DD/MM) and hour
+    const parisParts=new Intl.DateTimeFormat("fr-FR",{timeZone:"Europe/Paris",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).formatToParts(now);
+    const partMap={};parisParts.forEach(p=>partMap[p.type]=p.value);
+    const parisDate=`${partMap.day}/${partMap.month}`; // e.g. "28/04"
+    const parisHour=parseInt(partMap.hour),parisMinute=parseInt(partMap.minute);
+    const parisMinutesTotal=parisHour*60+parisMinute;
+
     for(const lobby of scrim.lobbies){
-      if(lobby.status!=="open")continue;
-      if(lobby.teamA.length+lobby.teamB.length<6)continue;
-      if(!lobby.dateStr||!lobby.timeStr)continue;
-      const u=scrimUnixSeconds(lobby);
-      if(!u||Math.floor(nowMs/1000)<u)continue;
-      // Find the scrim channel in any guild the bot is in
-      for(const[,guild]of client.guilds.cache){
-        const ch=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
-        if(ch){await maybeAutoValidate(lobby,ch);break;}
+      if(lobby.status!=="open"||!lobby.dateStr||!lobby.timeStr)continue;
+
+      // Normalize dateStr to DD/MM format (allow 1-digit days/months in input)
+      const [d,m]=lobby.dateStr.split("/").map(x=>x.padStart(2,"0"));
+      const normDate=`${d}/${m}`;
+      if(normDate!==parisDate)continue;
+
+      // Parse scrim time
+      const [sh,sm]=lobby.timeStr.split(":").map(x=>parseInt(x));
+      const scrimMinutesTotal=sh*60+sm;
+
+      // Send ping: if before noon (scrim time > noon), ping at noon. If scrim later than noon, ping at noon. If scrim BEFORE noon, ping immediately.
+      // Actually: ping at noon if scrim is that day. If it's already past noon when lobby is validated, ping immediately on day J with 3h timeout.
+      let shouldSendPing=false,timeoutHours=4;
+      const NOON=12*60;
+      if(!lobby.validationSent){
+        if(parisMinutesTotal>=NOON&&scrimMinutesTotal>=NOON+180){
+          // We're past noon today and scrim is at least 3h away → ping now with 3h window (scrim time − now)
+          shouldSendPing=true;
+          timeoutHours=Math.max(1,Math.floor((scrimMinutesTotal-parisMinutesTotal)/60)-1);
+        }else if(parisMinutesTotal>=NOON&&parisMinutesTotal<NOON+5){
+          // It's ~noon now → ping with 4h
+          shouldSendPing=true;timeoutHours=4;
+        }else if(parisMinutesTotal>=NOON&&scrimMinutesTotal<parisMinutesTotal){
+          // Scrim already passed today? skip
+          continue;
+        }
+      }
+
+      if(shouldSendPing){
+        lobby.validationSent=true;lobby.validationPingedAt=nowMs;lobby.timeoutHours=timeoutHours;
+        const all=[...lobby.teamA,...lobby.teamB];
+        for(const[,guild]of client.guilds.cache){
+          const ch=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+          if(!ch)continue;
+          for(const uid of all){
+            if(lobby.confirmed.includes(uid))continue;
+            lobby.pendingPings[uid]=nowMs;
+            const embed=new EmbedBuilder().setTitle(`🎯  Scrim #${lobby.id} — Confirm your presence!`).setColor(0xF1C40F)
+              .setDescription(`<@${uid}> — Are you available for the scrim on **${lobby.dateStr} at ${lobby.timeStr}**?\n\n*You have ${timeoutHours} hours to respond. If not, your slot will be opened.*`);
+            const row=new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`scrim_${lobby.id}_accept`).setLabel("✅ Accept").setStyle(ButtonStyle.Success),
+              new ButtonBuilder().setCustomId(`scrim_${lobby.id}_decline`).setLabel("❌ Decline").setStyle(ButtonStyle.Danger));
+            await ch.send({content:`<@${uid}>`,embeds:[embed],components:[row],allowedMentions:{users:[uid]}}).catch(()=>{});
+          }
+        }
+        await saveScrim();
+      }
+
+      // Auto-remove players who didn't respond
+      if(lobby.validationSent){
+        const toRemove=[];
+        const timeoutMs=(lobby.timeoutHours||4)*3600_000;
+        for(const uid of Object.keys(lobby.pendingPings)){
+          if(lobby.confirmed.includes(uid))continue;
+          if(nowMs-lobby.pendingPings[uid]>=timeoutMs)toRemove.push(uid);
+        }
+        if(toRemove.length>0){
+          for(const uid of toRemove){
+            lobby.teamA=lobby.teamA.filter(id=>id!==uid);lobby.teamB=lobby.teamB.filter(id=>id!==uid);
+            delete lobby.pendingPings[uid];
+            for(const[,guild]of client.guilds.cache){
+              const mb=await guild.members.fetch(uid).catch(()=>null);
+              if(mb)await mb.send(`⏰ You've been removed from Scrim **#${lobby.id}** for not responding in time.`).catch(()=>{});
+            }
+          }
+          await saveScrim();
+          for(const[,guild]of client.guilds.cache){
+            const ch=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+            if(ch)await updateScrimLobbyMessage(ch,lobby);
+          }
+        }
       }
     }
 
