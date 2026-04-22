@@ -943,6 +943,11 @@ async function cleanupLobby(lobby){
 client.on("messageCreate",async msg=>{
   try{
     if(msg.channel.name!=="queue-elb-pro"&&msg.channel.name!=="queue-lobby-elo")return;
+    // Ignore our own queue messages to prevent infinite loop
+    if(msg.author.id===client.user.id){
+      const title=msg.embeds?.[0]?.title||"";
+      if(title.includes("QUEUE")||title.includes("Queue"))return;
+    }
     const isProCh=msg.channel.name==="queue-elb-pro";
     const msgs=isProCh?proQueueMessages:queueMessages;
     // Don't repush if THIS message IS the queue message itself
