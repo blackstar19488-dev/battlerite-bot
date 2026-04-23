@@ -531,24 +531,54 @@ function queueEmbed(isPro){
   const m=M(isPro),lm=m.lobbies,q=isPro?proQueue:queue;
   const slot=getFreeLobbySlot(lm);
   const next=slot?`Lobby #${slot}${m.tag}`:null;
-  const title=isPro?`⚔️🔥 PRO QUEUE — Battlerite 3v3${next?` (${next})`:""}`:`⚔️ Battlerite 3v3 — Queue${next?` (${next})`:""}`;
-  // Calculate non-priority overflow: 6 + (number of placement players) + (number of dodged players)
   const placementInQ=isPro?q.filter(id=>placementPlayers.has(id)).length:0;
   const dodgedInQ=isPro?q.filter(id=>getDodgeCount(id)>0).length:0;
   const totalSlots=6+placementInQ+dodgedInQ;
   const hasNonPriority=placementInQ>0||dodgedInQ>0;
+
+  if(isPro){
+    // ESPORT Tournament Broadcast style for Pro Queue
+    const ELB="<:ELBPRO:1496812452845977662>";
+    const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
+    const bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    let body;
+    if(!next){
+      body=`${bar}\n⏳  **All PRO lobbies in progress**\n${bar}`;
+    }else if(q.length===0){
+      body=`${bar}\n▶  **${next}**  ·  Queue Open\n${bar}\n\n*Empty queue — Click **Join** to enter the arena.*\n*Only players with the **Pro** role can queue.*\n\n${bar}\n   **0 / 6  PLAYERS READY**\n${bar}`;
+    }else{
+      const rows=q.map((id,i)=>{
+        const isPlace=placementPlayers.has(id);
+        const dCount=getDodgeCount(id);
+        const elo=m.stats[id]?.elo??1000;
+        const eloStr=`\`${String(elo).padStart(4," ")} ELO\``;
+        const rank=`**${String(i+1).padStart(2,"0")}**`;
+        let marker="";
+        if(isPlace)marker="  🔴 *(non-priority)*";
+        else if(dCount>0)marker=`  🚫 *(dodged ${dCount}x)*`;
+        return `┃ ${rank}  <@${id}>${marker}  ·  ${eloStr}`;
+      }).join("\n");
+      const status=q.length>=6?"⚡  **MATCH READY**":`**${q.length} / ${totalSlots}  PLAYERS READY**`;
+      body=`${bar}\n▶  **${next}**  ·  ${q.length>=6?"Lobby Starting":"Queue Open"}\n${bar}\n\n${rows}\n\n${bar}\n   ${status}${hasNonPriority?"   ·   *non-priority in queue*":""}\n${bar}`;
+    }
+    return new EmbedBuilder()
+      .setColor(0x8B0000)
+      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
+      .setTitle(`${ELB}  PRO QUEUE  ${ELB}`)
+      .setDescription(body)
+      .setThumbnail(BANNER_URL)
+      .setFooter({text:"⚔️  Click JOIN to enter the arena"});
+  }
+
+  // Normal queue — unchanged visual
+  const title=`⚔️ Battlerite 3v3 — Queue${next?` (${next})`:""}`;
   let desc;
-  if(!next)desc=`*⏳ All ${isPro?"pro ":""}lobbies are in progress. Please wait.*`;
-  else if(q.length===0)desc=isPro?"*Queue is empty — click **Join** to enter!\nOnly players with the Pro role can queue.*":"*Queue is empty — click **Join** to enter!*";
+  if(!next)desc=`*⏳ All lobbies are in progress. Please wait.*`;
+  else if(q.length===0)desc="*Queue is empty — click **Join** to enter!*";
   else desc=q.map((id,i)=>{
-    const isPlace=isPro&&placementPlayers.has(id);
-    const dCount=isPro?getDodgeCount(id):0;
-    let name=`<@${id}>`;
-    if(isPlace)name=`🔴 **<@${id}> (non-priority)**`;
-    else if(dCount>0)name=`🚫 **<@${id}> (dodged ${dCount}x)**`;
-    return `**${i+1}.** ${name} — \`${(m.stats[id]?.elo??1000)} ELO\``;
+    return `**${i+1}.** <@${id}> — \`${(m.stats[id]?.elo??1000)} ELO\``;
   }).join("\n");
-  return new EmbedBuilder().setTitle(title).setColor(m.color).setDescription(desc).setFooter({text:`${q.length} / ${totalSlots} players${hasNonPriority?" (non-priority players in queue)":""}`});
+  return new EmbedBuilder().setTitle(title).setColor(m.color).setDescription(desc).setFooter({text:`${q.length} / 6 players`});
 }
 function queueBtns(isPro,disabled=false){
   const lm=isPro?proLobbies:lobbies;const blocked=allSlotsActive(lm);const pre=isPro?"pq_":"q_";
@@ -578,6 +608,38 @@ async function repushQueue(channel,isPro,locked=false){
 function boardEmbed(lobby){
   const s=stepOf(lobby);if(!s)return new EmbedBuilder().setTitle("Draft complete").setColor(0x57F287);
   const isBan=s.type==="ban",isG=isBan&&s.global,sec=lobby.timerSeconds,cap=captainOf(lobby),m=M(lobby.isPro);
+
+  if(lobby.isPro){
+    // ESPORT Tournament Broadcast style for Pro Draft
+    const ELB="<:ELBPRO:1496812452845977662>";
+    const bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    const phaseLabel=isG?"GLOBAL BAN PHASE":isBan?"BAN PHASE":"PICK PHASE";
+    const phaseEmoji=isG?"🌍":isBan?"🚫":"🎯";
+    let action;
+    if(isG)action=`🌍  **${teamLabel(lobby,s.team)} · GLOBAL BAN**\n     Captain <@${cap}>  ·  *removed for BOTH teams*`;
+    else if(isBan)action=`🚫  **${teamLabel(lobby,s.team)} · BAN**\n     Captain <@${cap}>`;
+    else action=`🎯  **${teamLabel(lobby,s.team)} · PICK**\n     Captain <@${cap}>`;
+    const tA=lobby.teamA.map((id,i)=>{const cr=id===lobby.captainA?"👑 ":"   ";const pk=lobby.picks.A[i]?champDisplay(lobby.picks.A[i]):"`[ ? ]`";return `${cr}<@${id}>\n       ${pk}`;}).join("\n\n");
+    const tB=lobby.teamB.map((id,i)=>{const cr=id===lobby.captainB?"👑 ":"   ";const pk=lobby.picks.B[i]?champDisplay(lobby.picks.B[i]):"`[ ? ]`";return `${cr}<@${id}>\n       ${pk}`;}).join("\n\n");
+    const gB=lobby.globalBans.length>0?lobby.globalBans.map(c=>champBanDisplay(c,true)).join("  ·  "):"—";
+    const rA=lobby.bans.A.length>0?lobby.bans.A.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
+    const rB=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
+    return new EmbedBuilder()
+      .setColor(0x8B0000)
+      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
+      .setTitle(`${ELB}  LOBBY #${lobby.lobbyId} PRO  ·  ${phaseLabel}  ${ELB}`)
+      .setDescription(`${bar}\n🗺️  **Map:**  \`${lobby.map}\`\n${bar}\n\n${action}\n\n${timerBar(sec)}\n${progressBar(lobby)}`)
+      .addFields(
+        {name:`🔵  TEAM ${lobby.teamNumA}`,value:tA||"\u200b",inline:true},
+        {name:"⚔️",value:"\u200b",inline:true},
+        {name:`🔴  TEAM ${lobby.teamNumB}`,value:tB||"\u200b",inline:true},
+        {name:"🌍  Global Bans",value:gB,inline:false},
+        {name:"\u200b",value:`🚫 **T${lobby.teamNumA} Bans:** ${rA}   ┃   **T${lobby.teamNumB} Bans:** ${rB}`,inline:false}
+      )
+      .setFooter({text:"75s per step  ·  auto random on timeout  ·  !captain to claim"});
+  }
+
+  // Normal queue draft — unchanged visual
   let action;
   if(isG)action=`🌍 **${teamLabel(lobby,s.team)} must GLOBAL BAN** — Captain <@${cap}>\n*Removed for BOTH teams.*`;
   else if(isBan)action=`🚫 **${teamLabel(lobby,s.team)} must BAN** — Captain <@${cap}>`;
@@ -587,8 +649,8 @@ function boardEmbed(lobby){
   const gB=lobby.globalBans.length>0?lobby.globalBans.map(c=>champBanDisplay(c,true)).join(", "):"—";
   const rA=lobby.bans.A.length>0?lobby.bans.A.map(c=>champBanDisplay(c,false)).join(", "):"—";
   const rB=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join(", "):"—";
-  const title=isG?`🌍  ${lobby.isPro?"PRO ":""}LOBBY #${lobby.lobbyId} — Global Ban Phase`:isBan?`🚫  ${lobby.isPro?"PRO ":""}LOBBY #${lobby.lobbyId} — Ban Phase`:`🎯  ${lobby.isPro?"PRO ":""}LOBBY #${lobby.lobbyId} — Pick Phase`;
-  const color=isG?0xE67E22:isBan?(lobby.isPro?0x8B0000:0xED4245):(lobby.isPro?0x8B0000:0x5865F2);
+  const title=isG?`🌍  LOBBY #${lobby.lobbyId} — Global Ban Phase`:isBan?`🚫  LOBBY #${lobby.lobbyId} — Ban Phase`:`🎯  LOBBY #${lobby.lobbyId} — Pick Phase`;
+  const color=isG?0xE67E22:isBan?0xED4245:0x5865F2;
   return new EmbedBuilder().setTitle(title).setColor(color)
     .setDescription(`🗺️ **Map: ${lobby.map}**\n\n${action}\n\n${timerBar(sec)}\n${progressBar(lobby)}`)
     .addFields({name:`🔵 TEAM ${lobby.teamNumA}${m.tag}`,value:tA||"\u200b",inline:true},{name:"⚔️",value:"\u200b",inline:true},{name:`🔴 TEAM ${lobby.teamNumB}${m.tag}`,value:tB||"\u200b",inline:true})
@@ -641,16 +703,55 @@ async function startDraftStep(lobby){
 }
 function advanceDraft(lobby){stopTimer(lobby);lobby.activeCategory=null;lobby.draftStep++;if(lobby.draftStep>=DRAFT_SEQ.length){finishDraft(lobby).catch(e=>log("ERROR","finishDraft:",e));return;}startDraftStep(lobby).catch(e=>log("ERROR","startDraftStep:",e));}
 
+// Champion spotlight — temporary 1.5s embed showing the champion pick/ban (Pro only)
+async function championSpotlight(lobby,action,team,champ,actorId){
+  if(!lobby.isPro||!lobby.draftChannel)return;
+  try{
+    const emoji=CHAMP_EMOJIS[champ]||"";
+    const color=action==="GLOBAL BAN"?0xE67E22:action==="BAN"?0xED4245:0x57F287;
+    const teamTag=team==="A"?`🔵 Team ${lobby.teamNumA}`:`🔴 Team ${lobby.teamNumB}`;
+    const icon=action==="GLOBAL BAN"?"🌍":action==="BAN"?"🚫":"🎯";
+    const embed=new EmbedBuilder()
+      .setColor(color)
+      .setDescription(`${icon}  **${action}**\n\n# ${emoji}\n# **${champ.toUpperCase()}**\n\nby <@${actorId}>  ·  ${teamTag}`);
+    const spotMsg=await lobby.draftChannel.send({embeds:[embed]}).catch(()=>null);
+    if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},1500);
+  }catch(e){log("ERROR","championSpotlight:",e);}
+}
+
 // ─── FINISH DRAFT ────────────────────────────────────────────────────
 async function finishDraft(lobby){
   stopTimer(lobby);const m=M(lobby.isPro);
   const gB=lobby.globalBans.length>0?lobby.globalBans.map(c=>champBanDisplay(c,true)).join(", "):"—";
   const rA=lobby.bans.A.length>0?lobby.bans.A.map(c=>champBanDisplay(c,false)).join(", "):"—";
   const rB=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join(", "):"—";
-  const finalEmbed=new EmbedBuilder().setTitle(`✅  ${lobby.isPro?"PRO ":""}LOBBY #${lobby.lobbyId} — Draft Complete!`).setColor(0x57F287)
-    .setDescription(`**▬▬▬▬▬▬ FINAL RECAP ▬▬▬▬▬▬**\n\n🗺️ **Map: ${lobby.map}**\n\n🌍 **Global Bans:** ${gB}\n🚫 **Bans T${lobby.teamNumA}:** ${rA}\n🚫 **Bans T${lobby.teamNumB}:** ${rB}`)
-    .addFields({name:`🔵 TEAM ${lobby.teamNumA}${m.tag}`,value:lobby.teamA.map((id,i)=>`<@${id}>\n${champDisplay(lobby.picks.A[i]??"?")}`).join("\n\n"),inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM ${lobby.teamNumB}${m.tag}`,value:lobby.teamB.map((id,i)=>`<@${id}>\n${champDisplay(lobby.picks.B[i]??"?")}`).join("\n\n"),inline:true})
-    .addFields({name:"\u200b",value:"*3 votes needed to confirm the result.*"}).setFooter({text:"Vote below to confirm the winner."});
+  let finalEmbed;
+  if(lobby.isPro){
+    const ELB="<:ELBPRO:1496812452845977662>";
+    const bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    const gBPro=lobby.globalBans.length>0?lobby.globalBans.map(c=>champBanDisplay(c,true)).join("  ·  "):"—";
+    const rAPro=lobby.bans.A.length>0?lobby.bans.A.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
+    const rBPro=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
+    finalEmbed=new EmbedBuilder()
+      .setColor(0xDAA520)
+      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
+      .setTitle(`${ELB}  LOBBY #${lobby.lobbyId} PRO · DRAFT COMPLETE  ${ELB}`)
+      .setDescription(`${bar}\n🗺️  **Map:**  \`${lobby.map}\`\n${bar}\n\n**FINAL ROSTER**`)
+      .addFields(
+        {name:`🔵  TEAM ${lobby.teamNumA}`,value:lobby.teamA.map((id,i)=>`<@${id}>\n       ${champDisplay(lobby.picks.A[i]??"?")}`).join("\n\n"),inline:true},
+        {name:"⚔️",value:"\u200b",inline:true},
+        {name:`🔴  TEAM ${lobby.teamNumB}`,value:lobby.teamB.map((id,i)=>`<@${id}>\n       ${champDisplay(lobby.picks.B[i]??"?")}`).join("\n\n"),inline:true},
+        {name:"🌍  Global Bans",value:gBPro,inline:false},
+        {name:"\u200b",value:`🚫 **T${lobby.teamNumA} Bans:** ${rAPro}   ┃   **T${lobby.teamNumB} Bans:** ${rBPro}`,inline:false},
+        {name:"\u200b",value:"🏆  *3 votes needed to confirm the winner*",inline:false}
+      )
+      .setFooter({text:"Vote below to confirm the winner"});
+  }else{
+    finalEmbed=new EmbedBuilder().setTitle(`✅  LOBBY #${lobby.lobbyId} — Draft Complete!`).setColor(0x57F287)
+      .setDescription(`**▬▬▬▬▬▬ FINAL RECAP ▬▬▬▬▬▬**\n\n🗺️ **Map: ${lobby.map}**\n\n🌍 **Global Bans:** ${gB}\n🚫 **Bans T${lobby.teamNumA}:** ${rA}\n🚫 **Bans T${lobby.teamNumB}:** ${rB}`)
+      .addFields({name:`🔵 TEAM ${lobby.teamNumA}${m.tag}`,value:lobby.teamA.map((id,i)=>`<@${id}>\n${champDisplay(lobby.picks.A[i]??"?")}`).join("\n\n"),inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM ${lobby.teamNumB}${m.tag}`,value:lobby.teamB.map((id,i)=>`<@${id}>\n${champDisplay(lobby.picks.B[i]??"?")}`).join("\n\n"),inline:true})
+      .addFields({name:"\u200b",value:"*3 votes needed to confirm the result.*"}).setFooter({text:"Vote below to confirm the winner."});
+  }
   const L=`${lobby.isPro?"P":"L"}${lobby.lobbyId}_`;
   const row1=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(L+"voteA").setLabel(`🔵  Team ${lobby.teamNumA}${m.tag} Won`).setStyle(ButtonStyle.Primary),new ButtonBuilder().setCustomId(L+"voteB").setLabel(`🔴  Team ${lobby.teamNumB}${m.tag} Won`).setStyle(ButtonStyle.Danger));
   const rows=[row1,cancelBtnRow(lobby)];
@@ -1794,8 +1895,8 @@ client.on("interactionCreate",async interaction=>{try{
     const ch=rest.replace("ban_","");if(lobby.globalBans.includes(ch))return interaction.reply({content:"❌ Global banned.",ephemeral:true});
     if(lobby.bans[s.team].includes(ch))return interaction.reply({content:"❌ Already banned.",ephemeral:true});
     const es=lobby.draftStep;stopTimer(lobby);await interaction.deferUpdate().catch(()=>{});if(lobby.draftStep!==es)return;
-    if(s.global){lobby.globalBans.push(ch);lobby.available=lobby.available.filter(c=>c!==ch);}
-    else{lobby.bans[s.team].push(ch);const opp=s.team==="A"?"B":"A";if(lobby.bans[opp].includes(ch))lobby.available=lobby.available.filter(c=>c!==ch);}
+    if(s.global){lobby.globalBans.push(ch);lobby.available=lobby.available.filter(c=>c!==ch);championSpotlight(lobby,"GLOBAL BAN",s.team,ch,interaction.user.id);}
+    else{lobby.bans[s.team].push(ch);const opp=s.team==="A"?"B":"A";if(lobby.bans[opp].includes(ch))lobby.available=lobby.available.filter(c=>c!==ch);championSpotlight(lobby,"BAN",s.team,ch,interaction.user.id);}
     advanceDraft(lobby);return;
   }
 
@@ -1809,7 +1910,7 @@ client.on("interactionCreate",async interaction=>{try{
     if(!lobby.available.includes(ch))return interaction.reply({content:"❌ Unavailable.",ephemeral:true});
     if(myPicks.includes(ch))return interaction.reply({content:"❌ Already picked.",ephemeral:true});
     const es=lobby.draftStep;stopTimer(lobby);await interaction.deferUpdate().catch(()=>{});if(lobby.draftStep!==es)return;
-    lobby.picks[s.team].push(ch);advanceDraft(lobby);return;
+    lobby.picks[s.team].push(ch);championSpotlight(lobby,"PICK",s.team,ch,interaction.user.id);advanceDraft(lobby);return;
   }
 
   // ── Vote ──
