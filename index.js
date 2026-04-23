@@ -1048,6 +1048,9 @@ client.on("messageCreate",async msg=>{try{
   // ── !fictifqueue — preview the Tournament Broadcast style queue (fake data) ──
   if(content==="!fictifqueue"){
     const ELB="<:ELBPRO:1496812452845977662>";
+    // TODO: replace with your imgur DIRECT image URL (right-click image → Copy image address)
+    const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
+    const ELB_IMG_URL="https://cdn.discordapp.com/emojis/1496812452845977662.png";
     const fake=[
       {name:"Ashterou",elo:1180,streak:"🔥"},
       {name:"Ray",elo:1094,streak:""},
@@ -1069,6 +1072,8 @@ client.on("messageCreate",async msg=>{try{
       .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
       .setTitle(`${ELB}  PRO QUEUE  ${ELB}`)
       .setDescription(desc)
+      .setThumbnail(ELB_IMG_URL)
+      .setImage(BANNER_URL)
       .setFooter({text:"⚔️  Click JOIN to enter the arena"});
     const row=new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("fictif_join").setLabel("✅  Join").setStyle(ButtonStyle.Success).setDisabled(true),
@@ -1081,6 +1086,9 @@ client.on("messageCreate",async msg=>{try{
   // ── !fictifdraft — preview the Tournament Broadcast style draft (fake data) ──
   if(content==="!fictifdraft"){
     const ELB="<:ELBPRO:1496812452845977662>";
+    // TODO: replace with your imgur DIRECT image URL (right-click image → Copy image address)
+    const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
+    const ELB_IMG_URL="https://cdn.discordapp.com/emojis/1496812452845977662.png";
     const bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
     const teamA=[
       {name:"Ashterou",champ:"Freya"},
@@ -1111,6 +1119,8 @@ client.on("messageCreate",async msg=>{try{
         {name:"🌍  Global Bans",value:globalBans,inline:false},
         {name:"\u200b",value:`🚫 **T1 Bans:** ${bansA}   ┃   **T2 Bans:** ${bansB}`,inline:false}
       )
+      .setThumbnail(ELB_IMG_URL)
+      .setImage(BANNER_URL)
       .setFooter({text:"75s per step  ·  auto random on timeout  ·  !captain to claim"});
     // Buttons — category selection (fake, disabled)
     const row1=new ActionRowBuilder().addComponents(
