@@ -1072,8 +1072,7 @@ client.on("messageCreate",async msg=>{try{
       .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
       .setTitle(`${ELB}  PRO QUEUE  ${ELB}`)
       .setDescription(desc)
-      .setThumbnail(ELB_IMG_URL)
-      .setImage(BANNER_URL)
+      .setThumbnail(BANNER_URL)
       .setFooter({text:"⚔️  Click JOIN to enter the arena"});
     const row=new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("fictif_join").setLabel("✅  Join").setStyle(ButtonStyle.Success).setDisabled(true),
@@ -1119,8 +1118,6 @@ client.on("messageCreate",async msg=>{try{
         {name:"🌍  Global Bans",value:globalBans,inline:false},
         {name:"\u200b",value:`🚫 **T1 Bans:** ${bansA}   ┃   **T2 Bans:** ${bansB}`,inline:false}
       )
-      .setThumbnail(ELB_IMG_URL)
-      .setImage(BANNER_URL)
       .setFooter({text:"75s per step  ·  auto random on timeout  ·  !captain to claim"});
     // Buttons — category selection (fake, disabled)
     const row1=new ActionRowBuilder().addComponents(
