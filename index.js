@@ -1110,34 +1110,45 @@ client.on("messageCreate",async msg=>{try{
     await msg.channel.send(`✅ <@${u.id}> is no longer in placement mode.`);return;
   }
 
-  // ── !dodge / !undodge / !mydodge (Pro only — any player) ──
+  // ── !dodge / !undodge / !mydodge (Admin-only — manage on behalf of players) ──
+  // Syntax: !dodge @victim for @owner   →  @owner now dodges @victim
+  //         !undodge @victim for @owner →  remove @victim from @owner's dodge list
+  //         !mydodge for @owner          →  show @owner's dodge list
   if(content.startsWith("!dodge")&&!content.startsWith("!dodgeclear")){
-    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!dodge @player`");
-    if(u.id===DODGE_PROTECTED_ID)return msg.reply("❌ You cannot dodge this player.");
-    if(u.id===msg.author.id)return msg.reply("❌ You cannot dodge yourself.");
-    const uid=msg.author.id;
-    if(!dodges[uid])dodges[uid]=[];
-    if(dodges[uid].includes(u.id))return msg.reply(`❌ <@${u.id}> is already in your dodge list.`);
-    dodges[uid].push(u.id);await saveDodges();
-    await msg.reply(`🚫 <@${u.id}> has been added to your **dodge list** (Pro only). Matches won't pop with both of you in queue.`);
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const mentions=msg.mentions.users;
+    if(mentions.size<2)return msg.reply("Usage: `!dodge @victim for @owner`");
+    const arr=[...mentions.values()];
+    const victim=arr[0],owner=arr[1];
+    if(victim.id===DODGE_PROTECTED_ID)return msg.reply("❌ You cannot dodge this player.");
+    if(victim.id===owner.id)return msg.reply("❌ A player cannot dodge themselves.");
+    if(!dodges[owner.id])dodges[owner.id]=[];
+    if(dodges[owner.id].includes(victim.id))return msg.reply(`❌ <@${victim.id}> is already in <@${owner.id}>'s dodge list.`,{allowedMentions:{parse:[]}});
+    dodges[owner.id].push(victim.id);await saveDodges();
+    await msg.reply({content:`🚫 <@${victim.id}> has been added to <@${owner.id}>'s dodge list (Pro only).`,allowedMentions:{parse:[]}});
     return;
   }
   if(content.startsWith("!undodge")){
-    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!undodge @player`");
-    const uid=msg.author.id;
-    if(!dodges[uid]||!dodges[uid].includes(u.id))return msg.reply("❌ This player is not in your dodge list.");
-    dodges[uid]=dodges[uid].filter(id=>id!==u.id);
-    if(dodges[uid].length===0)delete dodges[uid];
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const mentions=msg.mentions.users;
+    if(mentions.size<2)return msg.reply("Usage: `!undodge @victim for @owner`");
+    const arr=[...mentions.values()];
+    const victim=arr[0],owner=arr[1];
+    if(!dodges[owner.id]||!dodges[owner.id].includes(victim.id))return msg.reply({content:`❌ <@${victim.id}> is not in <@${owner.id}>'s dodge list.`,allowedMentions:{parse:[]}});
+    dodges[owner.id]=dodges[owner.id].filter(id=>id!==victim.id);
+    if(dodges[owner.id].length===0)delete dodges[owner.id];
     await saveDodges();
-    await msg.reply(`✅ <@${u.id}> removed from your dodge list.`);
+    await msg.reply({content:`✅ <@${victim.id}> removed from <@${owner.id}>'s dodge list.`,allowedMentions:{parse:[]}});
     return;
   }
-  if(content==="!mydodge"){
-    const uid=msg.author.id;
-    const list=dodges[uid]||[];
-    if(list.length===0)return msg.reply({content:"📋 Your dodge list is empty.",allowedMentions:{parse:[]}});
+  if(content.startsWith("!mydodge")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const u=msg.mentions.users.first();
+    if(!u)return msg.reply("Usage: `!mydodge for @owner`");
+    const list=dodges[u.id]||[];
+    if(list.length===0)return msg.reply({content:`📋 <@${u.id}>'s dodge list is empty.`,allowedMentions:{parse:[]}});
     const desc=list.map((id,i)=>`**${i+1}.** <@${id}>`).join("\n");
-    await msg.reply({embeds:[new EmbedBuilder().setTitle("🚫 Your Dodge List").setColor(0xE74C3C).setDescription(desc).setFooter({text:`${list.length} player(s) dodged`})],allowedMentions:{parse:[]}});
+    await msg.reply({embeds:[new EmbedBuilder().setTitle(`🚫 Dodge List — ${u.username}`).setColor(0xE74C3C).setDescription(desc).setFooter({text:`${list.length} player(s) dodged`})],allowedMentions:{parse:[]}});
     return;
   }
 
@@ -1237,7 +1248,7 @@ client.on("messageCreate",async msg=>{try{
   // ── !help ──
   if(content==="!help"){await msg.channel.send({embeds:[new EmbedBuilder().setTitle("📖  LobbyELO — Commands").setColor(0x5865F2).setDescription(
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n`!command` — Buttons menu for all commands\n\n"+
-    "**Pro Dodge (anyone):**\n`!dodge @player` — Don't match with this player in Pro\n`!undodge @player` — Remove from dodge list\n`!mydodge` — Show your dodge list\n\n"+
+    "**Pro Dodge (Admin only):**\n`!dodge @victim for @owner` — Make @owner dodge @victim\n`!undodge @victim for @owner` — Remove dodge\n`!mydodge for @owner` — Show @owner's dodge list\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
     "**Scrim (Ray + Admin + Lobby Admin):**\n`!scrim` — Create a new scrim lobby\n`!removescrim <id> @player` — Remove a player from a scrim\n`!cancelscrim <id>` — Cancel and delete a scrim\n`!draft <id>` (with image attached) — Upload a draft screenshot"
   )]});return;}
@@ -1894,6 +1905,13 @@ client.on("interactionCreate",async interaction=>{try{
 // ─── READY ───────────────────────────────────────────────────────────
 client.once("ready",async()=>{
   log("INFO",`Bot ready — ${client.user.tag}`);
+  // ── ONE-SHOT: wipe all dodges on this deployment ──
+  if(!fs.existsSync(p("dodges-wiped.flag"))){
+    const count=Object.keys(dodges).length;
+    dodges={};await saveDodges();
+    try{await fs.promises.writeFile(p("dodges-wiped.flag"),new Date().toISOString());}catch(e){}
+    log("INFO",`Wiped all dodges (${count} users had dodge lists).`);
+  }
   for(const[,guild]of client.guilds.cache){
     await ensureRoles(guild).catch(()=>{});
     const lc=guild.channels.cache.find(c=>c.name==="top-20-ladder"&&c.isTextBased());if(lc){ladderChannel=lc;await updateLadder();}
