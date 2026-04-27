@@ -1142,7 +1142,12 @@ client.on("messageCreate",async msg=>{try{
       if(isPro){const member=await msg.guild.members.fetch(userId).catch(()=>null);if(!member||!member.roles.cache.some(r=>r.name==="Pro")){if(isPro)_proQueueLock=false;return;}}
       const qCh=msg.guild.channels.cache.find(c=>c.name===m.qCh&&c.isTextBased());
       const isQCh=qCh&&msg.channel.id===qCh.id;
-      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
+      let maxSlots=6;
+      if(isPro){
+        const placementsInQ=q.filter(id=>placementPlayers.has(id)).length;
+        const dodgedInQ=q.filter(id=>getDodgeCount(id)>0).length;
+        maxSlots=6+placementsInQ+dodgedInQ;
+      }
       if(!allSlotsActive(lm)&&!q.includes(userId)&&!findLobbyByPlayer(userId)&&!findLobbyByExpected(userId)&&!bannedPlayers.has(userId)&&q.length<maxSlots){
         m.ensure(userId);q.push(userId);await addRole(msg.guild,userId,inQueueRole);
         if(isPro)proQueueJoinTime[userId]=Date.now();
@@ -1544,17 +1549,27 @@ client.on("messageCreate",async msg=>{try{
     if(!isAuth)return msg.reply("❌ Only players of this scrim can upload drafts.");
     const attachment=msg.attachments.first();
     if(!attachment||!attachment.contentType?.startsWith("image/"))return msg.reply("❌ Attach an image.");
+    // Re-upload the image to #history-scrim channel so the URL doesn't expire (Discord CDN attachments expire after ~24h)
+    const histCh=msg.guild.channels.cache.find(c=>c.name==="history-scrim"&&c.isTextBased());
+    if(!histCh)return msg.reply("❌ Channel #history-scrim not found. Cannot persist draft image.");
+    let permanentUrl=null;
+    try{
+      const fileName=`scrim-${lobby.id}-draft-${(lobby.drafts||[]).length+1}.${attachment.name?.split(".").pop()||"png"}`;
+      const reupload=await histCh.send({content:`📸 *Draft attachment for Scrim #${lobby.id}*`,files:[{attachment:attachment.url,name:fileName}]}).catch(()=>null);
+      if(!reupload||!reupload.attachments.first())return msg.reply("❌ Failed to re-upload draft image. Try again.");
+      permanentUrl=reupload.attachments.first().url;
+    }catch(e){log("ERROR","draft reupload:",e);return msg.reply("❌ Failed to re-upload draft image.");}
     if(!lobby.drafts)lobby.drafts=[];
-    lobby.drafts.push(attachment.url);
+    lobby.drafts.push(permanentUrl);
     await saveScrim();
-    // Update live scrim message (if status=validated) AND history message (if archived)
+    // Update live scrim message AND history recap message
     if(lobby.messageId&&lobby.status!=="archived"){
       const scrimCh=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
       if(scrimCh)await updateScrimLobbyMessage(scrimCh,lobby);
     }
     if(lobby.historyMsgId){
-      const histCh=msg.guild.channels.cache.find(c=>c.name==="history-scrim"&&c.isTextBased());
-      if(histCh){const m=await histCh.messages.fetch(lobby.historyMsgId).catch(()=>null);if(m)await m.edit({embeds:[scrimHistoryEmbed(lobby)],components:scrimHistoryBtns(lobby)}).catch(()=>{});}
+      const m=await histCh.messages.fetch(lobby.historyMsgId).catch(()=>null);
+      if(m)await m.edit({embeds:[scrimHistoryEmbed(lobby)],components:scrimHistoryBtns(lobby)}).catch(()=>{});
     }
     await msg.reply(`✅ Draft #${lobby.drafts.length} registered for Scrim **#${lobby.id}**.`);
     return;
@@ -1971,8 +1986,13 @@ client.on("interactionCreate",async interaction=>{try{
       if(bannedPlayers.has(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ You are banned.",ephemeral:true});}
       if(findLobbyByPlayer(interaction.user.id)||findLobbyByExpected(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"❌ Already in a match.",ephemeral:true});}
       if(q.includes(interaction.user.id)){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Already in queue.",ephemeral:true});}
-      // Queue full check — pro allows 7 if placements in queue
-      const maxSlots=isPro&&q.some(id=>placementPlayers.has(id))?7:6;
+      // Queue full check — pro: dynamic slots = 6 + placements + dodged
+      let maxSlots=6;
+      if(isPro){
+        const placementsInQ=q.filter(id=>placementPlayers.has(id)).length;
+        const dodgedInQ=q.filter(id=>getDodgeCount(id)>0).length;
+        maxSlots=6+placementsInQ+dodgedInQ;
+      }
       if(q.length>=maxSlots){if(isPro)_proQueueLock=false;else _queueLock=false;return interaction.reply({content:"Queue full.",ephemeral:true});}
       q.push(interaction.user.id);await addRole(interaction.guild,interaction.user.id,inQueueRole);
       if(isPro)proQueueJoinTime[interaction.user.id]=Date.now();
