@@ -239,6 +239,16 @@ async function saveScrim(){try{await fs.promises.writeFile(scrimFile,JSON.string
 function generateScrimId(){return Math.random().toString(16).slice(2,6).toUpperCase();}
 function findScrim(id){return scrim.lobbies.find(l=>l.id===id);}
 function activeScrims(){return scrim.lobbies.filter(l=>l.status!=="archived");}
+// Migrate: ensure all lobbies have a captains array
+for(const _l of scrim.lobbies){if(!Array.isArray(_l.captains))_l.captains=[];}
+// Central auth check for scrim actions: Ray + server admins + lobby creator + lobby captains
+function isScrimAuthorized(userId,lobby){
+  if(!lobby)return false;
+  if(userId===RAY_ID||ADMIN_IDS.includes(userId))return true;
+  if(userId===lobby.creatorId)return true;
+  if(Array.isArray(lobby.captains)&&lobby.captains.includes(userId))return true;
+  return false;
+}
 let _proPlacementDelay=null; // {timeout, channel, startTime}
 const queueMessages={},proQueueMessages={};
 let ladderMsg=null,ladderChannel=null,betLadderMsg=null,betLadderChannel=null,proLadderMsg=null,proLadderChannel=null;
@@ -248,7 +258,7 @@ function createLobby(lobbyId,isPro=false) {
   const off=(lobbyId-1)*2;
   return {
     lobbyId,isPro,teamNumA:off+1,teamNumB:off+2,
-    active:false,phase:null,expected:[],teamA:[],teamB:[],
+    active:false,phase:null,expected:[],teamA:[],teamB:[],captains:[],
     captainA:null,captainB:null,draftStep:0,available:[...CHAMPS],globalBans:[],
     bans:{A:[],B:[]},picks:{A:[],B:[]},votes:{A:new Set(),B:new Set()},cancelVotes:new Set(),
     channel:null,draftChannel:null,chatA:null,chatB:null,
@@ -438,21 +448,106 @@ async function updateBetLadder(){
 
 // ─── QUEUE UI ────────────────────────────────────────────────────────
 // ─── SCRIM LOBBY EMBED & BUTTONS ─────────────────────────────────────
+function formatTime12h(timeStr){
+  if(!timeStr||typeof timeStr!=="string")return timeStr||"";
+  const m=timeStr.match(/^(\d{1,2}):(\d{2})$/);if(!m)return timeStr;
+  let h=parseInt(m[1],10);const mm=m[2];if(isNaN(h)||h<0||h>23)return timeStr;
+  const suf=h>=12?"PM":"AM";h=h%12;if(h===0)h=12;
+  return `${h}:${mm} ${suf}`;
+}
+function parseTimeInput(str){
+  if(!str||typeof str!=="string")return null;
+  const s=str.trim().toUpperCase().replace(/\s+/g," ");
+  let m=s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
+  if(m){let h=parseInt(m[1],10);const mm=parseInt(m[2],10);
+    if(h<1||h>12||mm<0||mm>59)return null;
+    if(m[3]==="PM"&&h!==12)h+=12;if(m[3]==="AM"&&h===12)h=0;
+    return `${String(h).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;}
+  m=s.match(/^(\d{1,2}):(\d{2})$/);
+  if(m){const h=parseInt(m[1],10),mm=parseInt(m[2],10);
+    if(h<0||h>23||mm<0||mm>59)return null;
+    return `${String(h).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;}
+  return null;
+}
+function scrimUnixSeconds(lobby){
+  if(!lobby.dateStr||!lobby.timeStr)return null;
+  const dm=lobby.dateStr.split("/");if(dm.length!==2)return null;
+  const day=parseInt(dm[0],10),mon=parseInt(dm[1],10);
+  const hm=lobby.timeStr.split(":");if(hm.length!==2)return null;
+  const hh=parseInt(hm[0],10),mm=parseInt(hm[1],10);
+  if([day,mon,hh,mm].some(x=>isNaN(x)))return null;
+  const nowParisParts=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Paris",year:"numeric"}).formatToParts(new Date());
+  let year=parseInt(nowParisParts.find(p=>p.type==="year").value,10);
+  const buildUnix=(y)=>{
+    const wantAsUtc=Date.UTC(y,mon-1,day,hh,mm,0);
+    let guess=wantAsUtc;
+    for(let i=0;i<3;i++){
+      const parts=new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Paris",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).formatToParts(new Date(guess));
+      const pm={};parts.forEach(p=>pm[p.type]=p.value);
+      const parisWallAsUtc=Date.UTC(parseInt(pm.year),parseInt(pm.month)-1,parseInt(pm.day),parseInt(pm.hour==="24"?"0":pm.hour),parseInt(pm.minute),0);
+      const offset=parisWallAsUtc-guess;
+      const next=wantAsUtc-offset;
+      if(next===guess)break;
+      guess=next;
+    }
+    return Math.floor(guess/1000);
+  };
+  let unix=buildUnix(year);
+  const nowSec=Math.floor(Date.now()/1000);
+  if(nowSec-unix>86400)unix=buildUnix(year+1);
+  return unix;
+}
+function scrimTimestampStr(lobby){
+  const u=scrimUnixSeconds(lobby);
+  if(!u)return lobby.dateStr&&lobby.timeStr?`**${lobby.dateStr} — ${formatTime12h(lobby.timeStr)}**`:"*No date/time set*";
+  return `<t:${u}:F> (<t:${u}:R>)`;
+}
+async function maybeAutoValidate(lobby,scrimChannel){
+  if(lobby.status!=="open"&&lobby.status!=="ready")return false;
+  if(lobby.teamA.length+lobby.teamB.length<6)return false;
+  const u=scrimUnixSeconds(lobby);
+  if(!u)return false;
+  if(Math.floor(Date.now()/1000)<u)return false;
+  lobby.status="validated";
+  await saveScrim();
+  if(scrimChannel)await updateScrimLobbyMessage(scrimChannel,lobby);
+  const guild=scrimChannel?.guild;
+  if(guild){
+    const genCh=guild.channels.cache.find(c=>c.name==="general-scrim-chat"&&c.isTextBased());
+    if(genCh){
+      const all=[...lobby.teamA,...lobby.teamB];
+      const embed=new EmbedBuilder().setTitle(`🎯  Scrim #${lobby.id} — Session starting!`).setColor(0x57F287)
+        .setDescription(`📅 ${scrimTimestampStr(lobby)}\n\n**🔵 Team 1:**\n${lobby.teamA.map(id=>`<@${id}>`).join("\n")}\n\n**🔴 Team 2:**\n${lobby.teamB.map(id=>`<@${id}>`).join("\n")}`)
+        .setTimestamp();
+      await genCh.send({content:all.map(id=>`<@${id}>`).join(" "),embeds:[embed],allowedMentions:{users:all}}).catch(()=>{});
+    }
+  }
+  return true;
+}
+
 function scrimLobbyEmbed(lobby){
-  const slot=(id)=>{return id?`<@${id}>`:"*[Empty slot]*";};
-  const t1=[lobby.teamA[0],lobby.teamA[1],lobby.teamA[2]].map(slot).join("\n");
-  const t2=[lobby.teamB[0],lobby.teamB[1],lobby.teamB[2]].map(slot).join("\n");
+  const captains=Array.isArray(lobby.captains)?lobby.captains:[];
+  const slot=(id,n)=>{
+    if(!id)return `\`${n}\`  *empty*`;
+    const cr=captains.includes(id)?"👑 ":"";
+    return `\`${n}\`  ${cr}<@${id}>`;
+  };
+  const t1=[slot(lobby.teamA[0],1),slot(lobby.teamA[1],2),slot(lobby.teamA[2],3)].join("\n\n");
+  const t2=[slot(lobby.teamB[0],1),slot(lobby.teamB[1],2),slot(lobby.teamB[2],3)].join("\n\n");
   const total=lobby.teamA.length+lobby.teamB.length;
-  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${lobby.timeStr}**`:"📅 *No date/time set*";
+  const t1Count=lobby.teamA.length,t2Count=lobby.teamB.length;
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 ${scrimTimestampStr(lobby)}`:"📅 *No date/time set*";
   let title=`🎯  SCRIM #${lobby.id}`;
-  let statusStr=`${total}/6 players`;
-  if(lobby.status==="validated")statusStr=`⚔️ Match in progress`;
+  let statusStr;
+  if(lobby.status==="validated")statusStr=`✅ Session in progress`;
   else if(lobby.status==="ready")statusStr=`✅ 6/6 — Waiting for scheduled time`;
+  else statusStr=`${total}/6 players`;
+  const captainsLine=captains.length>0?`\n👑 **Captains:** ${captains.map(id=>`<@${id}>`).join(", ")}`:"";
   return new EmbedBuilder()
     .setTitle(title)
     .setColor(lobby.status==="validated"?0x57F287:lobby.status==="ready"?0xF1C40F:0x5865F2)
-    .setDescription(`${whenStr}\n\n👑 **Lobby Admin:** <@${lobby.creatorId}>`)
-    .addFields({name:"🔵 TEAM 1",value:t1||"*Empty*",inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:"🔴 TEAM 2",value:t2||"*Empty*",inline:true})
+    .setDescription(`${whenStr}\n👑 **Lobby Admin:** <@${lobby.creatorId}>${captainsLine}\n\n━━━━━━━━━━━━━━━━━━━━━━`)
+    .addFields({name:`🔵 TEAM 1 — ${t1Count}/3`,value:t1,inline:true},{name:"\u200b",value:"\u200b",inline:true},{name:`🔴 TEAM 2 — ${t2Count}/3`,value:t2,inline:true})
     .setFooter({text:statusStr});
 }
 function scrimLobbyBtns(lobby){
@@ -499,7 +594,7 @@ async function updateScrimLobbyMessage(channel,lobby){
 
 // ─── SCRIM HISTORY EMBED & BUTTONS ───────────────────────────────────
 function scrimHistoryEmbed(lobby){
-  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 **${lobby.dateStr} — ${lobby.timeStr}**`:"📅 *No date/time*";
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 ${scrimTimestampStr(lobby)}`:"📅 *No date/time*";
   const drafts=(lobby.drafts||[]).length>0?(lobby.drafts||[]).map((u,i)=>`[Draft ${i+1}](${u})`).join(" • "):"*No draft uploaded*";
   const replays=(lobby.replays||[]).length>0?`${(lobby.replays||[]).length} replay(s) available`:"*No replay uploaded*";
   const e=new EmbedBuilder().setTitle(`🏁  Scrim #${lobby.id} — Recap`).setColor(0x57F287)
@@ -511,7 +606,6 @@ function scrimHistoryEmbed(lobby){
       {name:"📸 Drafts",value:drafts,inline:false},
       {name:"📺 Replays",value:replays,inline:false}
     ).setTimestamp();
-  // Set first draft image as embed image if present
   if(lobby.drafts&&lobby.drafts[0])e.setImage(lobby.drafts[0]);
   return e;
 }
@@ -1250,7 +1344,7 @@ client.on("messageCreate",async msg=>{try{
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n`!command` — Buttons menu for all commands\n\n"+
     "**Pro Dodge (Admin only):**\n`!dodge @victim for @owner` — Make @owner dodge @victim\n`!undodge @victim for @owner` — Remove dodge\n`!mydodge for @owner` — Show @owner's dodge list\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
-    "**Scrim (Ray + Admin + Lobby Admin):**\n`!scrim` — Create a new scrim lobby\n`!removescrim <id> @player` — Remove a player from a scrim\n`!cancelscrim <id>` — Cancel and delete a scrim\n`!draft <id>` (with image attached) — Upload a draft screenshot"
+    "**Scrim:**\n`!scrim` — Create a new scrim lobby (anyone)\n`!signup @player t1|t2 <id>` — Add a player to a team (lobby admin/captain/Ray/admin)\n`!captainscrim @player <id>` — Assign a scrim captain (lobby admin/Ray/admin)\n`!removescrim <id> @player` — Remove a player (lobby admin/captain/Ray/admin)\n`!cancelscrim <id>` — Cancel and delete a scrim (lobby admin/captain/Ray/admin)\n`!draft <id>` (with image attached) — Upload a draft screenshot"
   )]});return;}
 
   // ── !command — buttons menu (ephemeral) ──
@@ -1294,7 +1388,7 @@ client.on("messageCreate",async msg=>{try{
     if(role&&member)await member.roles.add(role).catch(()=>{});
     const newLobby={
       id:lobbyId,creatorId:uid,roleId:role?.id??null,dateStr:null,timeStr:null,
-      teamA:[],teamB:[],
+      teamA:[],teamB:[],captains:[],
       messageId:null,status:"open",replays:[],drafts:[],historyMsgId:null,createdAt:Date.now()
     };
     scrim.lobbies.push(newLobby);
@@ -1306,13 +1400,12 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
-  // ── !removescrim <id> @player (Ray + Admin + lobby admin) ──
+  // ── !removescrim <id> @player (lobby admin + captains + Ray + admins) ──
   if(content.startsWith("!removescrim")){
     const parts=content.split(/\s+/);if(parts.length<2)return msg.reply("Usage: `!removescrim <lobbyId> @player`");
     const lobbyId=parts[1].toUpperCase();
     const lobby=findScrim(lobbyId);if(!lobby)return msg.reply("❌ Scrim lobby not found.");
-    const isAuth=msg.author.id===RAY_ID||ADMIN_IDS.includes(msg.author.id)||msg.author.id===lobby.creatorId;
-    if(!isAuth)return msg.reply("❌ Only Ray, admins, or the lobby admin can use this.");
+    if(!isScrimAuthorized(msg.author.id,lobby))return msg.reply("❌ Only the lobby admin, a scrim captain, Ray or admins can use this.");
     const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!removescrim <lobbyId> @player`");
     lobby.teamA=lobby.teamA.filter(id=>id!==u.id);lobby.teamB=lobby.teamB.filter(id=>id!==u.id);
     if(lobby.status==="ready"&&lobby.teamA.length+lobby.teamB.length<6)lobby.status="open";
@@ -1323,23 +1416,121 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
-  // ── !cancelscrim <id> (Ray + Admin + lobby admin) ──
+  // ── !cancelscrim <id> (lobby admin + captains + Ray + admins) ──
   if(content.startsWith("!cancelscrim")){
     const parts=content.split(/\s+/);if(parts.length<2)return msg.reply("Usage: `!cancelscrim <lobbyId>`");
     const lobbyId=parts[1].toUpperCase();
     const lobby=findScrim(lobbyId);if(!lobby)return msg.reply("❌ Scrim lobby not found.");
-    const isAuth=msg.author.id===RAY_ID||ADMIN_IDS.includes(msg.author.id)||msg.author.id===lobby.creatorId;
-    if(!isAuth)return msg.reply("❌ Only Ray, admins, or the lobby admin can use this.");
-    // Delete message
+    if(!isScrimAuthorized(msg.author.id,lobby))return msg.reply("❌ Only the lobby admin, a scrim captain, Ray or admins can use this.");
     const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
     if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});}
-    // Delete role
     if(lobby.roleId){const r=msg.guild.roles.cache.get(lobby.roleId);if(r)await r.delete().catch(()=>{});}
-    // Remove lobby from state
     scrim.lobbies=scrim.lobbies.filter(l=>l.id!==lobby.id);
     await saveScrim();
     if(ch)await refreshCreateScrimBtn(ch);
     await msg.channel.send(`⚠️ Scrim **#${lobby.id}** cancelled and deleted.`);
+    return;
+  }
+
+  // ── !cancelallscrim (Admin only — wipes ALL active scrim lobbies) ──
+  if(content==="!cancelallscrim"){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const active=activeScrims();
+    if(active.length===0)return msg.reply("ℹ️ No active scrims to cancel.");
+    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    let cancelled=0;
+    for(const lobby of [...active]){
+      // Delete message
+      if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});}
+      // Delete role
+      if(lobby.roleId){const r=msg.guild.roles.cache.get(lobby.roleId);if(r)await r.delete().catch(()=>{});}
+      // Remove from state
+      scrim.lobbies=scrim.lobbies.filter(l=>l.id!==lobby.id);
+      cancelled++;
+    }
+    await saveScrim();
+    if(ch)await refreshCreateScrimBtn(ch);
+    await msg.channel.send(`⚠️ **${cancelled} scrim(s) cancelled and deleted.**`);
+    return;
+  }
+
+  // ── !whododges @player (Admin only — debug who dodges a player) ──
+  if(content.startsWith("!whododges")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!whododges @player`");
+    const dodgers=Object.keys(dodges).filter(uid=>(dodges[uid]||[]).includes(u.id));
+    if(dodgers.length===0)return msg.reply({content:`✅ Nobody dodges <@${u.id}>.`,allowedMentions:{parse:[]}});
+    const desc=dodgers.map((id,i)=>`**${i+1}.** <@${id}>`).join("\n");
+    await msg.reply({embeds:[new EmbedBuilder().setTitle(`🚫 Players who dodge ${u.username}`).setColor(0xE74C3C).setDescription(desc).setFooter({text:`${dodgers.length} dodger(s)`})],allowedMentions:{parse:[]}});
+    return;
+  }
+
+  // ── !captainscrim @player <lobbyId> (lobby admin + Ray + admins) ──
+  if(content.startsWith("!captainscrim")){
+    const parts=content.split(/\s+/);
+    if(parts.length<3)return msg.reply("Usage: `!captainscrim @player <lobbyId>`");
+    const target=msg.mentions.users.first();
+    if(!target)return msg.reply("Usage: `!captainscrim @player <lobbyId>` — mention a player.");
+    const lobbyId=parts[parts.length-1].toUpperCase();
+    const lobby=findScrim(lobbyId);
+    if(!lobby)return msg.reply("❌ Scrim lobby not found.");
+    // Only the lobby creator + server admins (NOT existing captains)
+    const isAuth=msg.author.id===RAY_ID||ADMIN_IDS.includes(msg.author.id)||msg.author.id===lobby.creatorId;
+    if(!isAuth)return msg.reply("❌ Only the lobby admin, Ray or admins can assign a scrim captain.");
+    if(target.bot)return msg.reply("❌ Can't assign a bot as captain.");
+    if(target.id===lobby.creatorId)return msg.reply("ℹ️ That player is already the lobby admin.");
+    if(!Array.isArray(lobby.captains))lobby.captains=[];
+    if(lobby.captains.includes(target.id))return msg.reply(`ℹ️ <@${target.id}> is already a captain of scrim **#${lobby.id}**.`);
+    lobby.captains.push(target.id);
+    if(lobby.roleId){
+      const role=msg.guild.roles.cache.get(lobby.roleId);
+      const member=await msg.guild.members.fetch(target.id).catch(()=>null);
+      if(role&&member)await member.roles.add(role).catch(()=>{});
+    }
+    await saveScrim();
+    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    if(ch)await updateScrimLobbyMessage(ch,lobby);
+    await msg.channel.send(`👑 <@${target.id}> is now a captain of scrim **#${lobby.id}** — they can signup players, edit date/time, manage the lobby.`);
+    const m=await msg.guild.members.fetch(target.id).catch(()=>null);
+    if(m)await m.send(`👑 You are now a captain of scrim **#${lobby.id}**. You can use \`!signup\`, \`!removescrim\`, \`!cancelscrim\`, edit the date/time, and upload drafts/replays.`).catch(()=>{});
+    return;
+  }
+
+  // ── !signup @player t1|t2 <lobbyId> (lobby admin + captains + Ray + admins) ──
+  if(content.startsWith("!signup")){
+    const discreet=async(text,ok=true)=>{
+      await msg.delete().catch(()=>{});
+      const r=await msg.channel.send(`${ok?"":"❌ "}${text}`).catch(()=>null);
+      if(r)setTimeout(()=>r.delete().catch(()=>{}),ok?4000:6000);
+    };
+    const parts=content.split(/\s+/);
+    if(parts.length<4)return discreet("Usage: `!signup @player t1|t2 <lobbyId>`",false);
+    const target=msg.mentions.users.first();
+    if(!target)return discreet("Usage: `!signup @player t1|t2 <lobbyId>` — mention a player.",false);
+    let teamArg=null,lobbyId=null;
+    for(const pp of parts.slice(1)){
+      const low=pp.toLowerCase();
+      if(low==="t1"||low==="t2")teamArg=low;
+      else if(/^[0-9A-Fa-f]{4}$/.test(pp))lobbyId=pp.toUpperCase();
+    }
+    if(!teamArg)return discreet("Specify the team: `t1` or `t2`.",false);
+    if(!lobbyId)return discreet("Specify the lobby ID (e.g. `5CB0`).",false);
+    const lobby=findScrim(lobbyId);
+    if(!lobby)return discreet("Scrim lobby not found.",false);
+    if(!isScrimAuthorized(msg.author.id,lobby))return discreet("Only the lobby admin, a scrim captain, Ray or admins can use this.",false);
+    if(lobby.status!=="open"&&lobby.status!=="ready")return discreet("This scrim is not accepting new players.",false);
+    if(target.bot)return discreet("Can't signup a bot.",false);
+    if(lobby.teamA.includes(target.id)||lobby.teamB.includes(target.id))return discreet(`<@${target.id}> is already in this scrim.`,false);
+    const team=teamArg==="t1"?lobby.teamA:lobby.teamB;
+    const teamLabelStr=teamArg==="t1"?"Team 1":"Team 2";
+    if(team.length>=3)return discreet(`${teamLabelStr} is full.`,false);
+    team.push(target.id);
+    if(lobby.teamA.length+lobby.teamB.length===6&&lobby.status==="open")lobby.status="ready";
+    await saveScrim();
+    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    if(ch)await updateScrimLobbyMessage(ch,lobby);
+    await maybeAutoValidate(lobby,ch);
+    await discreet(`<@${target.id}> added to ${teamLabelStr} of scrim **#${lobby.id}**.`,true);
     return;
   }
 
@@ -1667,7 +1858,7 @@ client.on("interactionCreate",async interaction=>{try{
     if(role&&member)await member.roles.add(role).catch(()=>{});
     const newLobby={
       id:lobbyId,creatorId:uid,roleId:role?.id??null,dateStr:null,timeStr:null,
-      teamA:[],teamB:[],
+      teamA:[],teamB:[],captains:[],
       messageId:null,status:"open",replays:[],drafts:[],historyMsgId:null,createdAt:Date.now()
     };
     scrim.lobbies.push(newLobby);
