@@ -1170,6 +1170,26 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
+  // ── !proqueue @player (admin — force-add a player to the Pro queue) ──
+  if(content.startsWith("!proqueue")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!proqueue @player`");
+    if(u.bot)return msg.reply("❌ Can't add a bot to the queue.");
+    if(proQueue.includes(u.id))return msg.reply(`❌ <@${u.id}> is already in the Pro queue.`,{allowedMentions:{parse:[]}});
+    if(findLobbyByPlayer(u.id)||findLobbyByExpected(u.id))return msg.reply(`❌ <@${u.id}> is already in a match.`,{allowedMentions:{parse:[]}});
+    const m=M(true);m.ensure(u.id);
+    proQueue.push(u.id);
+    proQueueJoinTime[u.id]=Date.now();
+    await addRole(msg.guild,u.id,inQueueRole);
+    const qCh=msg.guild.channels.cache.find(c=>c.name==="queue-elb-pro"&&c.isTextBased());
+    if(qCh){
+      await refreshQueue(qCh,true).catch(()=>{});
+      tryStartLobby(qCh,true);
+    }
+    await msg.reply({content:`✅ <@${u.id}> force-added to the Pro queue.`,allowedMentions:{parse:[]}});
+    return;
+  }
+
   // ── !clearqueue ──
   if(base.startsWith("!clearqueue")){
     if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ No permission.");
@@ -1348,7 +1368,7 @@ client.on("messageCreate",async msg=>{try{
   if(content==="!help"){await msg.channel.send({embeds:[new EmbedBuilder().setTitle("📖  LobbyELO — Commands").setColor(0x5865F2).setDescription(
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n`!command` — Buttons menu for all commands\n\n"+
     "**Pro Dodge (Admin only):**\n`!dodge @victim for @owner` — Make @owner dodge @victim\n`!undodge @victim for @owner` — Remove dodge\n`!mydodge for @owner` — Show @owner's dodge list\n\n"+
-    "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
+    "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!proqueue @player` — Force-add a player to Pro queue\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
     "**Scrim:**\n`!scrim` — Create a new scrim lobby (anyone)\n`!signup @player t1|t2 <id>` — Add a player to a team (lobby admin/captain/Ray/admin)\n`!captainscrim @player <id>` — Assign a scrim captain (lobby admin/Ray/admin)\n`!removescrim <id> @player` — Remove a player (lobby admin/captain/Ray/admin)\n`!cancelscrim <id>` — Cancel and delete a scrim (lobby admin/captain/Ray/admin)\n`!draft <id>` (with image attached) — Upload a draft screenshot"
   )]});return;}
 
