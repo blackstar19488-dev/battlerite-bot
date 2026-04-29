@@ -626,34 +626,41 @@ function queueEmbed(isPro){
   const hasNonPriority=placementInQ>0||dodgedInQ>0;
 
   if(isPro){
-    // ESPORT Tournament Broadcast style for Pro Queue
-    const ELB="<:ELBPRO:1496812452845977662>";
+    // OPTION A — CHAMPIONSHIP BROADCAST
     const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
-    const bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    // Color shifts based on queue state: empty (cyan glacé) → filling (gold) → ready (electric green)
+    let color=0x00BFFF; // cyan glacé default
+    if(q.length>=6)color=0x00FF7F; // electric green
+    else if(q.length>=4)color=0xFFD700; // gold (filling)
+    else if(q.length>=1)color=0x4A90E2; // ocean blue
+
+    // Progress bar visual (always 10 segments wide)
+    const filledSeg=Math.min(10,Math.round((q.length/6)*10));
+    const emptySeg=10-filledSeg;
+    const progressBar=`▰`.repeat(filledSeg)+`▱`.repeat(emptySeg);
+
     let body;
     if(!next){
-      body=`${bar}\n⏳  **All PRO lobbies in progress**\n${bar}`;
+      body=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n⏳  *All PRO lobbies in progress. Please wait.*`;
     }else if(q.length===0){
-      body=`${bar}\n▶  **${next}**  ·  Queue Open\n${bar}\n\n*Empty queue — Click **Join** to enter the arena.*\n*Only players with the **Pro** role can queue.*\n\n${bar}\n   **0 / 6  PLAYERS READY**\n${bar}`;
+      body=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n⚔️ ‎ ‎ **${next.toUpperCase()}**   •   AWAITING WARRIORS\n\n${progressBar}  ${q.length} / 6  STANDBY\n\n╭──────────────────────────────────╮\n│   *Empty queue — Click* **Join** *to enter*   │\n│   *Only players with* **Pro** *role can queue* │\n╰──────────────────────────────────╯\n\n⚡  **TAP "JOIN" TO ENTER THE ARENA**`;
     }else{
       const rows=q.map((id,i)=>{
         const isPlace=placementPlayers.has(id);
         const dCount=getDodgeCount(id);
         const elo=m.stats[id]?.elo??1000;
-        const eloStr=`\`${String(elo).padStart(4," ")} ELO\``;
-        const rank=`**${String(i+1).padStart(2,"0")}**`;
         let marker="";
-        if(isPlace)marker="  🔴 *(non-priority)*";
-        else if(dCount>0)marker=`  🚫 *(dodged ${dCount}x)*`;
-        return `┃ ${rank}  <@${id}>${marker}  ·  ${eloStr}`;
+        if(isPlace)marker=" 🔴";
+        else if(dCount>0)marker=` 🚫×${dCount}`;
+        return `│  **${String(i+1).padStart(2," ")}**  <@${id}>${marker}  ·  \`${String(elo).padStart(4," ")} ELO\`  │`;
       }).join("\n");
-      const status=q.length>=6?"⚡  **MATCH READY**":`**${q.length} / ${totalSlots}  PLAYERS READY**`;
-      body=`${bar}\n▶  **${next}**  ·  ${q.length>=6?"Lobby Starting":"Queue Open"}\n${bar}\n\n${rows}\n\n${bar}\n   ${status}${hasNonPriority?"   ·   *non-priority in queue*":""}\n${bar}`;
+      const statusLine=q.length>=6?"⚡⚡⚡ **MATCH READY — LOBBY STARTING** ⚡⚡⚡":`⚡  **AWAITING ${totalSlots-q.length} MORE WARRIOR${totalSlots-q.length>1?"S":""}**  ⚡`;
+      const subtitle=q.length>=6?"⚔️ ‎ ‎ **LOBBY STARTING**  •  WARRIORS LOCKED IN":`⚔️ ‎ ‎ **${next.toUpperCase()}**  •  ROSTER FILLING`;
+      body=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n${subtitle}\n\n${progressBar}  **${q.length} / ${totalSlots}**  ${q.length>=6?"COMBAT-READY":"STANDBY"}\n\n╭──────────────────────────────────╮\n${rows}\n╰──────────────────────────────────╯\n\n${statusLine}${hasNonPriority?"\n*⚠️ non-priority players in queue*":""}`;
     }
     return new EmbedBuilder()
-      .setColor(0x8B0000)
-      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
-      .setTitle(`${ELB}  PRO QUEUE  ${ELB}`)
+      .setColor(color)
+      .setTitle("🏆  P R O   L E A G U E  🏆")
       .setDescription(body)
       .setThumbnail(BANNER_URL)
       .setFooter({text:"⚔️  Click JOIN to enter the arena"});
@@ -715,7 +722,6 @@ function boardEmbed(lobby){
     const rB=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
     return new EmbedBuilder()
       .setColor(0x8B0000)
-      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
       .setTitle(`${ELB}  LOBBY #${lobby.lobbyId} PRO  ·  ${phaseLabel}  ${ELB}`)
       .setDescription(`${bar}\n🗺️  **Map:**  \`${lobby.map}\`\n${bar}\n\n${action}\n\n${timerBar(sec)}\n${progressBar(lobby)}`)
       .addFields(
@@ -771,6 +777,18 @@ function pushBoard(l){if(!l.boardMsg)return;l._boardQueue=(l._boardQueue||Promis
 // ─── DRAFT TIMER ─────────────────────────────────────────────────────
 async function startDraftStep(lobby){
   stopTimer(lobby);lobby.timerSeconds=DRAFT_TIMER;
+  // Effect 3 + 4 (Pro only): Phase transition flash + Captain spotlight (only on actual transitions, not first step)
+  if(lobby.isPro&&lobby.draftStep>0){
+    const s=stepOf(lobby);
+    if(s){
+      const phaseStr=s.type==="ban"?(s.global?"GLOBAL BAN":"BAN"):"PICK";
+      const cap=captainOf(lobby);
+      // Phase transition flash (0.8s)
+      phaseTransitionFlash(lobby,phaseStr,s.team).catch(()=>{});
+      // Wait briefly so flash and captain spotlight don't overlap, then captain spotlight
+      setTimeout(()=>{captainTurnSpotlight(lobby,s.team,cap,phaseStr).catch(()=>{});},900);
+    }
+  }
   if(!lobby.boardMsg){lobby.boardMsg=await lobby.draftChannel.send({embeds:[boardEmbed(lobby)],components:buildDraftButtons(lobby)}).catch(()=>null);if(!lobby.boardMsg)return;}
   else await pushBoard(lobby);
   lobby.timerInterval=setInterval(async()=>{lobby.timerSeconds-=5;if(lobby.timerSeconds<=0){clearInterval(lobby.timerInterval);lobby.timerInterval=null;return;}await pushBoard(lobby);},5000);
@@ -781,12 +799,15 @@ async function startDraftStep(lobby){
     if(s.type==="ban"){
       if(s.global){const pool=CHAMPS.filter(c=>!lobby.globalBans.includes(c));const ch=pool[Math.floor(Math.random()*pool.length)];lobby.globalBans.push(ch);lobby.available=lobby.available.filter(c=>c!==ch);
         await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(ch)} was **GLOBAL BANNED** by ${teamLabel(lobby,s.team)} (<@${cap}>).`).catch(()=>{});
+        if(lobby.isPro)championSpotlight(lobby,"GLOBAL BAN",s.team,ch,cap).catch(()=>{});
       }else{const pool=CHAMPS.filter(c=>!lobby.bans[s.team].includes(c)&&!lobby.globalBans.includes(c));const ch=pool[Math.floor(Math.random()*pool.length)];lobby.bans[s.team].push(ch);
         if(lobby.bans[opp].includes(ch))lobby.available=lobby.available.filter(c=>c!==ch);
-        await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(ch)} was **banned** for ${teamLabel(lobby,s.team)} (<@${cap}>).`).catch(()=>{});}
+        await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(ch)} was **banned** for ${teamLabel(lobby,s.team)} (<@${cap}>).`).catch(()=>{});
+        if(lobby.isPro)championSpotlight(lobby,"BAN",s.team,ch,cap).catch(()=>{});}
     }else{const oppBans=s.team==="A"?lobby.bans.B:lobby.bans.A,myPicks=lobby.picks[s.team];
       const pool=lobby.available.filter(c=>!oppBans.includes(c)&&!myPicks.includes(c));const ch=pool[Math.floor(Math.random()*pool.length)]??lobby.available[0];
-      lobby.picks[s.team].push(ch);await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(ch)} was **picked** for ${teamLabel(lobby,s.team)} (<@${cap}>).`).catch(()=>{});}
+      lobby.picks[s.team].push(ch);await lobby.draftChannel.send(`⏱️ Time's up! ${champDisplay(ch)} was **picked** for ${teamLabel(lobby,s.team)} (<@${cap}>).`).catch(()=>{});
+      if(lobby.isPro)championSpotlight(lobby,"PICK",s.team,ch,cap).catch(()=>{});}
     if(lobby.draftStep===expectedStep)advanceDraft(lobby);
   },DRAFT_TIMER*1000);
 }
@@ -797,15 +818,97 @@ async function championSpotlight(lobby,action,team,champ,actorId){
   if(!lobby.isPro||!lobby.draftChannel)return;
   try{
     const emoji=CHAMP_EMOJIS[champ]||"";
-    const color=action==="GLOBAL BAN"?0xE67E22:action==="BAN"?0xED4245:0x57F287;
     const teamTag=team==="A"?`🔵 Team ${lobby.teamNumA}`:`🔴 Team ${lobby.teamNumB}`;
     const icon=action==="GLOBAL BAN"?"🌍":action==="BAN"?"🚫":"🎯";
+    const verb=action==="GLOBAL BAN"?"GLOBAL BANNING":action==="BAN"?"BANNING":"PICKING";
+    // Step 1 — INCOMING (gray) 0.3s
+    const e1=new EmbedBuilder()
+      .setColor(0x808080)
+      .setDescription(`${icon}  **${verb}...**\n\n# ❓ ❓ ❓\n\n*Captain <@${actorId}> is locking in...*  ·  ${teamTag}`);
+    const spotMsg=await lobby.draftChannel.send({embeds:[e1]}).catch(()=>null);
+    if(!spotMsg)return;
+    // Step 2 — REVEAL (yellow flashing) 0.3s
+    setTimeout(async()=>{
+      const e2=new EmbedBuilder()
+        .setColor(0xFFD700)
+        .setDescription(`${icon}  **${action}!**\n\n# ⚡ ${emoji} ⚡\n# **${champ.toUpperCase()}!**\n\nby <@${actorId}>  ·  ${teamTag}`);
+      await spotMsg.edit({embeds:[e2]}).catch(()=>{});
+    },300);
+    // Step 3 — LOCKED IN (final color) 1s
+    setTimeout(async()=>{
+      const finalColor=action==="GLOBAL BAN"?0xE67E22:action==="BAN"?0xED4245:0x00FF7F;
+      const stamp=action==="PICK"?"LOCKED IN":action==="BAN"?"BANNED":"GLOBAL BANNED";
+      const e3=new EmbedBuilder()
+        .setColor(finalColor)
+        .setDescription(`${icon}  **${action}**\n\n# ${emoji}\n# **${champ.toUpperCase()}**  ·  ✅ **${stamp}**\n\nby <@${actorId}>  ·  ${teamTag}`);
+      await spotMsg.edit({embeds:[e3]}).catch(()=>{});
+    },600);
+    // Delete after 1.6s total
+    setTimeout(()=>{spotMsg.delete().catch(()=>{});},1600);
+  }catch(e){log("ERROR","championSpotlight:",e);}
+}
+
+// Effect 4 — Captain spotlight: shown when it's a team's turn (0.8s temporary embed)
+async function captainTurnSpotlight(lobby,team,captainId,phase){
+  if(!lobby.isPro||!lobby.draftChannel)return;
+  try{
+    const teamTag=team==="A"?`🔵 TEAM ${lobby.teamNumA}`:`🔴 TEAM ${lobby.teamNumB}`;
+    const phaseEmoji=phase==="GLOBAL BAN"?"🌍":phase==="BAN"?"🚫":"🎯";
+    const color=team==="A"?0x4A90E2:0xED4245;
     const embed=new EmbedBuilder()
       .setColor(color)
-      .setDescription(`${icon}  **${action}**\n\n# ${emoji}\n# **${champ.toUpperCase()}**\n\nby <@${actorId}>  ·  ${teamTag}`);
+      .setDescription(`⚔️  **${teamTag}'S TURN**  ⚔️\n\n# ${phaseEmoji}  **${phase}**\n\n👑  Captain <@${captainId}>  •  *make your choice...*`);
     const spotMsg=await lobby.draftChannel.send({embeds:[embed]}).catch(()=>null);
-    if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},1500);
-  }catch(e){log("ERROR","championSpotlight:",e);}
+    if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},800);
+  }catch(e){log("ERROR","captainTurnSpotlight:",e);}
+}
+
+// Effect 3 — Phase transition flash (between draft steps, 0.8s temporary embed)
+async function phaseTransitionFlash(lobby,nextPhase,nextTeam){
+  if(!lobby.isPro||!lobby.draftChannel)return;
+  try{
+    const teamLabel=nextTeam==="A"?`TEAM ${lobby.teamNumA}`:`TEAM ${lobby.teamNumB}`;
+    const phaseEmoji=nextPhase==="GLOBAL BAN"?"🌍":nextPhase==="BAN"?"🚫":"🎯";
+    const embed=new EmbedBuilder()
+      .setColor(0x9B59B6)
+      .setDescription(`═══════════════════════════\n\n   ${phaseEmoji}  **NEXT: ${teamLabel} ${nextPhase}**  ${phaseEmoji}\n\n═══════════════════════════`);
+    const spotMsg=await lobby.draftChannel.send({embeds:[embed]}).catch(()=>null);
+    if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},800);
+  }catch(e){log("ERROR","phaseTransitionFlash:",e);}
+}
+
+// Effect 5 — Map reveal (typewriter animation at draft start, 3s temporary embed)
+async function mapRevealAnimation(lobby){
+  if(!lobby.isPro||!lobby.draftChannel||!lobby.map)return;
+  try{
+    const mapName=lobby.map.toUpperCase();
+    const e1=new EmbedBuilder()
+      .setColor(0x8B7355)
+      .setDescription(`🗺️  **MAP DRAWING...**\n\n# ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n*Spinning the wheel of destiny...*`);
+    const spotMsg=await lobby.draftChannel.send({embeds:[e1]}).catch(()=>null);
+    if(!spotMsg)return;
+    // Typewriter: reveal letters progressively
+    const totalChars=mapName.length;
+    const steps=Math.min(6,totalChars);
+    for(let i=1;i<=steps;i++){
+      await new Promise(r=>setTimeout(r,250));
+      const charsToShow=Math.floor((i/steps)*totalChars);
+      const revealed=mapName.substring(0,charsToShow);
+      const placeholder="▓".repeat(totalChars-charsToShow);
+      const e=new EmbedBuilder()
+        .setColor(0xCCAA00)
+        .setDescription(`🗺️  **MAP DRAWING...**\n\n# ${revealed}${placeholder}\n\n*${i<steps?"Revealing...":"Map locked!"}*`);
+      await spotMsg.edit({embeds:[e]}).catch(()=>{});
+    }
+    // Final reveal
+    await new Promise(r=>setTimeout(r,300));
+    const eFinal=new EmbedBuilder()
+      .setColor(0x00FF7F)
+      .setDescription(`🗺️  **MAP LOCKED**\n\n# ⚔️  ${mapName}  ⚔️\n\n✅  *Battle commences...*`);
+    await spotMsg.edit({embeds:[eFinal]}).catch(()=>{});
+    // Delete after 1.5s
+    setTimeout(()=>{spotMsg.delete().catch(()=>{});},1500);
+  }catch(e){log("ERROR","mapRevealAnimation:",e);}
 }
 
 // ─── FINISH DRAFT ────────────────────────────────────────────────────
@@ -823,7 +926,6 @@ async function finishDraft(lobby){
     const rBPro=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
     finalEmbed=new EmbedBuilder()
       .setColor(0xDAA520)
-      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
       .setTitle(`${ELB}  LOBBY #${lobby.lobbyId} PRO · DRAFT COMPLETE  ${ELB}`)
       .setDescription(`${bar}\n🗺️  **Map:**  \`${lobby.map}\`\n${bar}\n\n**FINAL ROSTER**`)
       .addFields(
@@ -976,6 +1078,11 @@ async function startMatch(lobby){
     if(betProCh)lobby.betMsg=await betProCh.send({embeds:[betEmbed],components:[betRow]}).catch(()=>null);
   }else{
     lobby.betMsg=await lobby.channel.send({embeds:[betEmbed],components:[betRow]}).catch(()=>null);
+  }
+  // Effect 5 (Pro only): Map reveal typewriter animation before the draft starts
+  if(lobby.isPro){
+    await mapRevealAnimation(lobby);
+    await new Promise(r=>setTimeout(r,500)); // small pause after reveal
   }
   await startDraftStep(lobby);
 }
@@ -1271,32 +1378,26 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
-  // ── !fictifqueue — preview the Tournament Broadcast style queue (fake data) ──
+  // ── !fictifqueue — preview the Championship Broadcast style queue ──
   if(content==="!fictifqueue"){
-    const ELB="<:ELBPRO:1496812452845977662>";
-    // TODO: replace with your imgur DIRECT image URL (right-click image → Copy image address)
     const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
-    const ELB_IMG_URL="https://cdn.discordapp.com/emojis/1496812452845977662.png";
     const fake=[
-      {name:"Ashterou",elo:1180,streak:"🔥"},
-      {name:"Ray",elo:1094,streak:""},
-      {name:"Sheepa",elo:1052,streak:""},
-      {name:"Fiully",elo:1026,streak:""},
-      {name:"Hanlosh",elo:998,streak:""},
-      {name:"LoLDab",elo:972,streak:""}
+      {name:"Ashterou",elo:1480,games:50},
+      {name:"Ray",elo:1180,games:30},
+      {name:"Sheepa",elo:1052,games:25},
+      {name:"Fiully",elo:1026,games:20},
+      {name:"Hanlosh",elo:898,games:3},
+      {name:"LoLDab",elo:972,games:15}
     ];
-    const bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    const filledSeg=Math.min(10,Math.round((fake.length/6)*10));
+    const progressBar=`▰`.repeat(filledSeg)+`▱`.repeat(10-filledSeg);
     const rows=fake.map((p,i)=>{
-      const rank=`**${String(i+1).padStart(2,"0")}**`;
-      const nameCol=`\`${p.name.padEnd(14," ")}\``;
-      const eloCol=`\`${String(p.elo).padStart(4," ")} ELO\``;
-      return `┃ ${rank}  ${nameCol}  ${eloCol}  ${p.streak}`;
+      return `│  **${String(i+1).padStart(2," ")}**  \`${p.name.padEnd(12," ")}\`  ·  \`${String(p.elo).padStart(4," ")} ELO\`  │`;
     }).join("\n");
-    const desc=`${bar}\n▶  **LOBBY #1 PRO**  ·  Queue Open\n${bar}\n\n${rows}\n\n${bar}\n   **${fake.length} / 6  PLAYERS READY**\n${bar}`;
+    const desc=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n⚔️ ‎ ‎ **LOBBY STARTING**  •  WARRIORS LOCKED IN\n\n${progressBar}  **${fake.length} / 6**  COMBAT-READY\n\n╭──────────────────────────────────╮\n${rows}\n╰──────────────────────────────────╯\n\n⚡⚡⚡ **MATCH READY — LOBBY STARTING** ⚡⚡⚡`;
     const embed=new EmbedBuilder()
-      .setColor(0x8B0000)
-      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
-      .setTitle(`${ELB}  PRO QUEUE  ${ELB}`)
+      .setColor(0x00FF7F)
+      .setTitle("🏆  P R O   L E A G U E  🏆")
       .setDescription(desc)
       .setThumbnail(BANNER_URL)
       .setFooter({text:"⚔️  Click JOIN to enter the arena"});
@@ -1334,7 +1435,6 @@ client.on("messageCreate",async msg=>{try{
     const progressBar="▰▰▰▰▰▱▱▱▱▱▱▱  5 / 12";
     const embed=new EmbedBuilder()
       .setColor(0x8B0000)
-      .setAuthor({name:"BATTLERITE PRO · Tournament Mode"})
       .setTitle(`${ELB}  LOBBY #1 PRO — PICK PHASE  ${ELB}`)
       .setDescription(`${bar}\n🗺️  **Map:**  \`Blackstone Arena Day\`\n${bar}\n\n🎯 **TEAM 1 must PICK** — Captain <@123>\n\n${timerBar}\n${progressBar}`)
       .addFields(
