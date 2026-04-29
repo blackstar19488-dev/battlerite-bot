@@ -634,16 +634,16 @@ function queueEmbed(isPro){
     else if(q.length>=4)color=0xFFD700; // gold (filling)
     else if(q.length>=1)color=0x4A90E2; // ocean blue
 
-    // Progress bar visual (always 10 segments wide)
-    const filledSeg=Math.min(10,Math.round((q.length/6)*10));
-    const emptySeg=10-filledSeg;
-    const progressBar=`▰`.repeat(filledSeg)+`▱`.repeat(emptySeg);
+    // Progress bar visual (always 12 segments wide for cleaner look)
+    const filledSeg=Math.min(12,Math.round((q.length/6)*12));
+    const progressBar=`▰`.repeat(filledSeg)+`▱`.repeat(12-filledSeg);
+    const missing=Math.max(0,6-q.length);
 
     let body;
     if(!next){
-      body=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n⏳  *All PRO lobbies in progress. Please wait.*`;
+      body=`⏳  *All PRO lobbies are in progress.*\n*Please wait for one to finish.*`;
     }else if(q.length===0){
-      body=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n⚔️ ‎ ‎ **${next.toUpperCase()}**   •   AWAITING WARRIORS\n\n${progressBar}  ${q.length} / 6  STANDBY\n\n╭──────────────────────────────────╮\n│   *Empty queue — Click* **Join** *to enter*   │\n│   *Only players with* **Pro** *role can queue* │\n╰──────────────────────────────────╯\n\n⚡  **TAP "JOIN" TO ENTER THE ARENA**`;
+      body=`# 🔥  ${missing}  PLAYERS NEEDED  🔥\n\n${progressBar}\n\u200b\n**${next.toUpperCase()}**  •  *Click JOIN to enter*`;
     }else{
       const rows=q.map((id,i)=>{
         const isPlace=placementPlayers.has(id);
@@ -652,15 +652,19 @@ function queueEmbed(isPro){
         let marker="";
         if(isPlace)marker=" 🔴";
         else if(dCount>0)marker=` 🚫×${dCount}`;
-        return `│  **${String(i+1).padStart(2," ")}**  <@${id}>${marker}  ·  \`${String(elo).padStart(4," ")} ELO\`  │`;
+        return `\`${String(i+1).padStart(2," ")}\`  <@${id}>${marker}  ·  \`${String(elo).padStart(4," ")} ELO\``;
       }).join("\n");
-      const statusLine=q.length>=6?"⚡⚡⚡ **MATCH READY — LOBBY STARTING** ⚡⚡⚡":`⚡  **AWAITING ${totalSlots-q.length} MORE WARRIOR${totalSlots-q.length>1?"S":""}**  ⚡`;
-      const subtitle=q.length>=6?"⚔️ ‎ ‎ **LOBBY STARTING**  •  WARRIORS LOCKED IN":`⚔️ ‎ ‎ **${next.toUpperCase()}**  •  ROSTER FILLING`;
-      body=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n${subtitle}\n\n${progressBar}  **${q.length} / ${totalSlots}**  ${q.length>=6?"COMBAT-READY":"STANDBY"}\n\n╭──────────────────────────────────╮\n${rows}\n╰──────────────────────────────────╯\n\n${statusLine}${hasNonPriority?"\n*⚠️ non-priority players in queue*":""}`;
+      let header;
+      if(q.length>=6){
+        header=`# ⚡⚡⚡  MATCH READY  ⚡⚡⚡\n# 🔥  LOBBY STARTING  🔥`;
+      }else{
+        header=`# 🔥  ${missing}  PLAYER${missing>1?"S":""}  NEEDED  🔥`;
+      }
+      body=`${header}\n\n${progressBar}  **${q.length} / ${totalSlots}**\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n${rows}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**${next.toUpperCase()}**${hasNonPriority?"  •  *non-priority in queue*":""}`;
     }
     return new EmbedBuilder()
       .setColor(color)
-      .setTitle("🏆  P R O   L E A G U E  🏆")
+      .setTitle("🏆   PRO LEAGUE   🏆")
       .setDescription(body)
       .setThumbnail(BANNER_URL)
       .setFooter({text:"⚔️  Click JOIN to enter the arena"});
@@ -686,18 +690,34 @@ async function refreshQueue(channel,isPro,locked=false){
   return repushQueue(channel,isPro,locked);
 }
 
+// Concurrency lock per channel to prevent two repushes running at the same time (was causing duplicates)
+const _repushLocks={};
+
 // Delete ALL queue messages in the channel, then post ONE new queue message at the bottom
 async function repushQueue(channel,isPro,locked=false){
-  const msgs=isPro?proQueueMessages:queueMessages;
-  // Delete every queue message in this channel (both tracked and orphan)
+  const chId=channel.id;
+  if(_repushLocks[chId])return; // another repush is already running
+  _repushLocks[chId]=true;
   try{
-    const recent=await channel.messages.fetch({limit:50});
-    const allQueueMsgs=recent.filter(m=>m.author.id===client.user.id&&m.embeds.length>0&&(m.embeds[0].title?.includes("QUEUE")||m.embeds[0].title?.includes("Queue")));
-    for(const[,m]of allQueueMsgs)await m.delete().catch(()=>{});
-  }catch(e){}
-  delete msgs[channel.id];
-  // Post the single new message
-  msgs[channel.id]=await channel.send({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
+    const msgs=isPro?proQueueMessages:queueMessages;
+    // Delete every queue message in this channel (any of our queue-style embeds)
+    try{
+      const recent=await channel.messages.fetch({limit:50});
+      const allQueueMsgs=recent.filter(m=>{
+        if(m.author.id!==client.user.id)return false;
+        if(m.embeds.length===0)return false;
+        const t=m.embeds[0].title||"";
+        // Match all known queue-message titles (current + legacy)
+        return t.includes("QUEUE")||t.includes("Queue")||t.includes("LEAGUE")||t.includes("League")||t.includes("PRO LEAGUE")||t.match(/P\s*R\s*O/);
+      });
+      for(const[,m]of allQueueMsgs)await m.delete().catch(()=>{});
+    }catch(e){}
+    delete msgs[chId];
+    // Post the single new message
+    msgs[chId]=await channel.send({embeds:[queueEmbed(isPro)],components:[queueBtns(isPro,locked)]});
+  }finally{
+    _repushLocks[chId]=false;
+  }
 }
 
 // ─── DRAFT BOARD ─────────────────────────────────────────────────────
@@ -1382,22 +1402,21 @@ client.on("messageCreate",async msg=>{try{
   if(content==="!fictifqueue"){
     const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
     const fake=[
-      {name:"Ashterou",elo:1480,games:50},
-      {name:"Ray",elo:1180,games:30},
-      {name:"Sheepa",elo:1052,games:25},
-      {name:"Fiully",elo:1026,games:20},
-      {name:"Hanlosh",elo:898,games:3},
-      {name:"LoLDab",elo:972,games:15}
+      {name:"Ashterou",elo:1480},
+      {name:"Ray",elo:1180},
+      {name:"Sheepa",elo:1052},
+      {name:"Fiully",elo:1026}
     ];
-    const filledSeg=Math.min(10,Math.round((fake.length/6)*10));
-    const progressBar=`▰`.repeat(filledSeg)+`▱`.repeat(10-filledSeg);
+    const filledSeg=Math.min(12,Math.round((fake.length/6)*12));
+    const progressBar=`▰`.repeat(filledSeg)+`▱`.repeat(12-filledSeg);
+    const missing=6-fake.length;
     const rows=fake.map((p,i)=>{
-      return `│  **${String(i+1).padStart(2," ")}**  \`${p.name.padEnd(12," ")}\`  ·  \`${String(p.elo).padStart(4," ")} ELO\`  │`;
+      return `\`${String(i+1).padStart(2," ")}\`  \`${p.name.padEnd(12," ")}\`  ·  \`${String(p.elo).padStart(4," ")} ELO\``;
     }).join("\n");
-    const desc=`╔═══════════════════════════════════════╗\n   🏆  **PRO LEAGUE**  •  SEASON LIVE\n╚═══════════════════════════════════════╝\n\n⚔️ ‎ ‎ **LOBBY STARTING**  •  WARRIORS LOCKED IN\n\n${progressBar}  **${fake.length} / 6**  COMBAT-READY\n\n╭──────────────────────────────────╮\n${rows}\n╰──────────────────────────────────╯\n\n⚡⚡⚡ **MATCH READY — LOBBY STARTING** ⚡⚡⚡`;
+    const desc=`# 🔥  ${missing}  PLAYER${missing>1?"S":""}  NEEDED  🔥\n\n${progressBar}  **${fake.length} / 6**\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n${rows}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**LOBBY #1 PRO**`;
     const embed=new EmbedBuilder()
-      .setColor(0x00FF7F)
-      .setTitle("🏆  P R O   L E A G U E  🏆")
+      .setColor(0xFFD700)
+      .setTitle("🏆   PRO LEAGUE   🏆")
       .setDescription(desc)
       .setThumbnail(BANNER_URL)
       .setFooter({text:"⚔️  Click JOIN to enter the arena"});
