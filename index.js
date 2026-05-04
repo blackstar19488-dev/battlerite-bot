@@ -236,6 +236,22 @@ let scrim=fs.existsSync(scrimFile)?JSON.parse(fs.readFileSync(scrimFile)):{
 // replays: array of url strings
 // drafts: array of image urls (uploaded screenshots)
 async function saveScrim(){try{await fs.promises.writeFile(scrimFile,JSON.stringify(scrim,null,2));}catch(e){log("ERROR","saveScrim:",e);}}
+
+// ─── TOURNAMENT STATE ────────────────────────────────────────────────
+const tournamentFile=p("tournament.json");
+let tournament=fs.existsSync(tournamentFile)?JSON.parse(fs.readFileSync(tournamentFile)):{
+  active:false,
+  name:null,
+  date:null,
+  players:[], // array of player IDs
+  captains:[], // array of captain IDs (subset of players)
+  messageId:null,
+  channelId:null,
+  guildId:null,
+  status:"signup" // signup | drafting | done
+};
+async function saveTournament(){try{await fs.promises.writeFile(tournamentFile,JSON.stringify(tournament,null,2));}catch(e){log("ERROR","saveTournament:",e);}}
+const TOURNAMENT_MAX_PLAYERS=42;
 function generateScrimId(){return Math.random().toString(16).slice(2,6).toUpperCase();}
 function findScrim(id){return scrim.lobbies.find(l=>l.id===id);}
 function activeScrims(){return scrim.lobbies.filter(l=>l.status!=="archived");}
@@ -523,6 +539,54 @@ async function maybeAutoValidate(lobby,scrimChannel){
     }
   }
   return true;
+}
+
+// ─── TOURNAMENT EMBED ───────────────────────────────────────────────
+function tournamentEmbed(){
+  if(!tournament.active){
+    return new EmbedBuilder()
+      .setTitle("🏆  TOURNAMENT  🏆")
+      .setColor(0x95A5A6)
+      .setDescription("*No active tournament.*\n\nUse `!tournament <name> <date>` to create one.");
+  }
+  const total=tournament.players.length;
+  const cap=tournament.captains.length;
+  const reg=Math.max(0,total);
+  const remaining=Math.max(0,TOURNAMENT_MAX_PLAYERS-total);
+  const playersList=tournament.players.length>0
+    ? tournament.players.map((id,i)=>{
+        const isCpt=tournament.captains.includes(id);
+        const num=`\`${String(i+1).padStart(2," ")}.\``;
+        const tag=`<@${id}>`;
+        const cptTag=isCpt?"  ←  👑 **Captain**":"";
+        return `${num}  ${tag}${cptTag}`;
+      }).join("\n")
+    : "*No players registered yet.*";
+  let statusLine;
+  if(tournament.status==="signup")statusLine=`📝  **SIGN UPS OPEN**  ·  ${reg} / ${TOURNAMENT_MAX_PLAYERS} players  ·  ${cap} / 10 captains`;
+  else if(tournament.status==="drafting")statusLine=`⚔️  **DRAFT IN PROGRESS**`;
+  else statusLine=`🏁  **TOURNAMENT COMPLETE**`;
+  const desc=`╔══════════════════════════════════════╗\n   🏆  **${tournament.name||"TOURNAMENT"}**  —  ${tournament.date||"TBD"}\n╚══════════════════════════════════════╝\n\n${statusLine}\n\nClick below to register for the tournament.\nNeed 30 players for 10 teams of 3.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📋  **REGISTERED PLAYERS**  (${total} / ${TOURNAMENT_MAX_PLAYERS})\n\n${playersList}`;
+  return new EmbedBuilder()
+    .setColor(0xFFD700)
+    .setTitle("🏆  TOURNAMENT  🏆")
+    .setDescription(desc)
+    .setFooter({text:tournament.status==="signup"?"📝  Click 'Sign Up' to register":"Tournament in progress"});
+}
+function tournamentBtns(){
+  if(!tournament.active||tournament.status!=="signup")return [];
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("tournament_signup").setLabel("📝 Sign Up").setStyle(ButtonStyle.Success)
+  )];
+}
+async function refreshTournamentEmbed(client){
+  if(!tournament.active||!tournament.messageId||!tournament.channelId||!tournament.guildId)return;
+  try{
+    const guild=client.guilds.cache.get(tournament.guildId);if(!guild)return;
+    const ch=guild.channels.cache.get(tournament.channelId);if(!ch)return;
+    const msg=await ch.messages.fetch(tournament.messageId).catch(()=>null);if(!msg)return;
+    await msg.edit({embeds:[tournamentEmbed()],components:tournamentBtns()}).catch(()=>{});
+  }catch(e){log("ERROR","refreshTournamentEmbed:",e);}
 }
 
 function scrimLobbyEmbed(lobby){
@@ -1398,6 +1462,143 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
+  // ── !tournament <name> <date> — create or reset the tournament (Admin only) ──
+  if(content.startsWith("!tournament")&&!content.startsWith("!tournamentstats")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    // Parse: !tournament <name> <date>
+    const args=content.slice("!tournament".length).trim();
+    if(args.length===0&&tournament.active){
+      // No args, just show the embed
+      const m=await msg.channel.send({embeds:[tournamentEmbed()],components:tournamentBtns()});
+      tournament.messageId=m.id;
+      tournament.channelId=msg.channel.id;
+      tournament.guildId=msg.guild.id;
+      await saveTournament();
+      return;
+    }
+    if(args.length===0)return msg.reply("Usage: `!tournament <name> <date>`  (e.g. `!tournament May Cup — May 30, 2026`)");
+    // If active tournament exists, ask to reset first
+    if(tournament.active&&tournament.status!=="signup")return msg.reply(`❌ A tournament is already in progress (${tournament.name}). Use \`!resettournament\` first.`);
+    // Try to split name and date
+    let name=args,date=null;
+    const dashSplit=args.split(/\s*[—–-]\s*/);
+    if(dashSplit.length>=2){name=dashSplit[0].trim();date=dashSplit.slice(1).join(" - ").trim();}
+    tournament.active=true;
+    tournament.name=name;
+    tournament.date=date||"TBD";
+    tournament.players=[];
+    tournament.captains=[];
+    tournament.status="signup";
+    tournament.guildId=msg.guild.id;
+    tournament.channelId=msg.channel.id;
+    const m=await msg.channel.send({embeds:[tournamentEmbed()],components:tournamentBtns()});
+    tournament.messageId=m.id;
+    await saveTournament();
+    return;
+  }
+
+  // ── !signuptourney @p1 @p2 ... (Admin — bulk add players) ──
+  if(content.startsWith("!signuptourney")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    if(!tournament.active)return msg.reply("❌ No active tournament. Create one with `!tournament <name> <date>`.");
+    if(tournament.status!=="signup")return msg.reply("❌ Sign ups are closed.");
+    const mentions=msg.mentions.users;
+    if(mentions.size===0)return msg.reply("Usage: `!signuptourney @player1 @player2 ...`");
+    let added=0,already=0,full=0;
+    for(const[,u]of mentions){
+      if(u.bot)continue;
+      if(tournament.players.includes(u.id)){already++;continue;}
+      if(tournament.players.length>=TOURNAMENT_MAX_PLAYERS){full++;continue;}
+      tournament.players.push(u.id);added++;
+    }
+    await saveTournament();
+    await refreshTournamentEmbed(client);
+    let reply=`✅ Added **${added}** player(s).`;
+    if(already>0)reply+=`  ·  ${already} already registered.`;
+    if(full>0)reply+=`  ·  ${full} could not be added (tournament full at ${TOURNAMENT_MAX_PLAYERS}).`;
+    await msg.reply(reply);
+    return;
+  }
+
+  // ── !removetourney @p1 @p2 ... (Admin — bulk remove players) ──
+  if(content.startsWith("!removetourney")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    if(!tournament.active)return msg.reply("❌ No active tournament.");
+    const mentions=msg.mentions.users;
+    if(mentions.size===0)return msg.reply("Usage: `!removetourney @player1 @player2 ...`");
+    let removed=0,notFound=0;
+    for(const[,u]of mentions){
+      if(!tournament.players.includes(u.id)){notFound++;continue;}
+      tournament.players=tournament.players.filter(id=>id!==u.id);
+      tournament.captains=tournament.captains.filter(id=>id!==u.id);
+      removed++;
+    }
+    await saveTournament();
+    await refreshTournamentEmbed(client);
+    let reply=`✅ Removed **${removed}** player(s).`;
+    if(notFound>0)reply+=`  ·  ${notFound} were not registered.`;
+    await msg.reply(reply);
+    return;
+  }
+
+  // ── !setcaptain @p1 @p2 ... (Admin — designate captains, max 10) ──
+  if(content.startsWith("!setcaptain")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    if(!tournament.active)return msg.reply("❌ No active tournament.");
+    const mentions=msg.mentions.users;
+    if(mentions.size===0)return msg.reply("Usage: `!setcaptain @player1 @player2 ...`");
+    let added=0,notRegistered=0,already=0,full=0;
+    for(const[,u]of mentions){
+      if(!tournament.players.includes(u.id)){notRegistered++;continue;}
+      if(tournament.captains.includes(u.id)){already++;continue;}
+      if(tournament.captains.length>=10){full++;continue;}
+      tournament.captains.push(u.id);added++;
+    }
+    await saveTournament();
+    await refreshTournamentEmbed(client);
+    let reply=`👑 Designated **${added}** captain(s).`;
+    if(already>0)reply+=`  ·  ${already} already captain.`;
+    if(notRegistered>0)reply+=`  ·  ${notRegistered} not in the player pool (use \`!signuptourney\` first).`;
+    if(full>0)reply+=`  ·  ${full} could not be added (max 10 captains).`;
+    await msg.reply(reply);
+    return;
+  }
+
+  // ── !unsetcaptain @p1 @p2 ... (Admin — remove captain status, doesn't remove from pool) ──
+  if(content.startsWith("!unsetcaptain")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    if(!tournament.active)return msg.reply("❌ No active tournament.");
+    const mentions=msg.mentions.users;
+    if(mentions.size===0)return msg.reply("Usage: `!unsetcaptain @player1 @player2 ...`");
+    let removed=0,notCaptain=0;
+    for(const[,u]of mentions){
+      if(!tournament.captains.includes(u.id)){notCaptain++;continue;}
+      tournament.captains=tournament.captains.filter(id=>id!==u.id);
+      removed++;
+    }
+    await saveTournament();
+    await refreshTournamentEmbed(client);
+    let reply=`✅ Removed captain status from **${removed}** player(s).`;
+    if(notCaptain>0)reply+=`  ·  ${notCaptain} were not captain.`;
+    await msg.reply(reply);
+    return;
+  }
+
+  // ── !resettournament (Admin — completely reset) ──
+  if(content==="!resettournament"){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    if(!tournament.active)return msg.reply("ℹ️ No active tournament to reset.");
+    // Delete embed message
+    if(tournament.messageId&&tournament.channelId){
+      const ch=msg.guild.channels.cache.get(tournament.channelId);
+      if(ch){const m=await ch.messages.fetch(tournament.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});}
+    }
+    tournament={active:false,name:null,date:null,players:[],captains:[],messageId:null,channelId:null,guildId:null,status:"signup"};
+    await saveTournament();
+    await msg.reply("✅ Tournament reset — all data cleared.");
+    return;
+  }
+
   // ── !fictifqueue — preview the Championship Broadcast style queue ──
   if(content==="!fictifqueue"){
     const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
@@ -1488,7 +1689,8 @@ client.on("messageCreate",async msg=>{try{
     "**Everyone:**\n`!queue` / `!queue pro` — Join queue\n`!stats` / `!statspro` — Your stats\n`!stats @player` / `!statspro @player` — Someone's stats\n`!history` / `!history pro` — Last 5 matches\n`!season` / `!season pro` — Season info\n`!MMR` / `!MMR @player` — Lifetime MMR\n`!relation @p1 @p2` — Head-to-head\n`!totalplayer` — All players\n`!captain` — Claim captain\n`!ladder` / `!ladderbet` — Leaderboards\n`!command` — Buttons menu for all commands\n\n"+
     "**Pro Dodge (Admin only):**\n`!dodge @victim for @owner` — Make @owner dodge @victim\n`!undodge @victim for @owner` — Remove dodge\n`!mydodge for @owner` — Show @owner's dodge list\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!proqueue @player` — Force-add a player to Pro queue\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
-    "**Scrim:**\n`!scrim` — Create a new scrim lobby (anyone)\n`!signup @player t1|t2 <id>` — Add a player to a team (lobby admin/captain/Ray/admin)\n`!captainscrim @player <id>` — Assign a scrim captain (lobby admin/Ray/admin)\n`!removescrim <id> @player` — Remove a player (lobby admin/captain/Ray/admin)\n`!cancelscrim <id>` — Cancel and delete a scrim (lobby admin/captain/Ray/admin)\n`!draft <id>` (with image attached) — Upload a draft screenshot"
+    "**Scrim:**\n`!scrim` — Create a new scrim lobby (anyone)\n`!signup @player t1|t2 <id>` — Add a player to a team (lobby admin/captain/Ray/admin)\n`!captainscrim @player <id>` — Assign a scrim captain (lobby admin/Ray/admin)\n`!removescrim <id> @player` — Remove a player (lobby admin/captain/Ray/admin)\n`!cancelscrim <id>` — Cancel and delete a scrim (lobby admin/captain/Ray/admin)\n`!draft <id>` (with image attached) — Upload a draft screenshot\n\n"+
+    "**Tournament (Admin only):**\n`!tournament <name> — <date>` — Create a new tournament & post sign-up board\n`!signuptourney @p1 @p2 ...` — Bulk add players to the tournament pool\n`!removetourney @p1 @p2 ...` — Bulk remove players\n`!setcaptain @p1 @p2 ...` — Designate captains (max 10)\n`!unsetcaptain @p1 @p2 ...` — Remove captain status\n`!resettournament` — Wipe the active tournament"
   )]});return;}
 
   // ── !command — buttons menu (ephemeral) ──
@@ -1998,6 +2200,20 @@ client.on("interactionCreate",async interaction=>{try{
       modal.addComponents(new ActionRowBuilder().addComponents(i1),new ActionRowBuilder().addComponents(i2));
       await interaction.showModal(modal);return;
     }
+    return;
+  }
+
+  // ── Tournament: self-signup button ──
+  if(cid==="tournament_signup"){
+    if(!tournament.active)return interaction.reply({content:"❌ No active tournament.",ephemeral:true});
+    if(tournament.status!=="signup")return interaction.reply({content:"❌ Sign ups are closed.",ephemeral:true});
+    const uid=interaction.user.id;
+    if(tournament.players.includes(uid))return interaction.reply({content:"ℹ️ You are already signed up. Contact an admin to change your registration.",ephemeral:true});
+    if(tournament.players.length>=TOURNAMENT_MAX_PLAYERS)return interaction.reply({content:`❌ Tournament is full (${TOURNAMENT_MAX_PLAYERS} players max).`,ephemeral:true});
+    tournament.players.push(uid);
+    await saveTournament();
+    await refreshTournamentEmbed(client);
+    await interaction.reply({content:`✅ You're signed up for **${tournament.name}**! Good luck!`,ephemeral:true});
     return;
   }
 
