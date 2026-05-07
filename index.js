@@ -691,7 +691,7 @@ function queueEmbed(isPro){
 
   if(isPro){
     // OPTION A — CHAMPIONSHIP BROADCAST
-    const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
+    const BANNER_URL="https://i.imgur.com/3UwWd0R.jpeg";
     // Color shifts based on queue state: empty (cyan glacé) → filling (gold) → ready (electric green)
     let color=0x00BFFF; // cyan glacé default
     if(q.length>=6)color=0x00FF7F; // electric green
@@ -806,7 +806,7 @@ function boardEmbed(lobby){
     const rB=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
     return new EmbedBuilder()
       .setColor(0x8B0000)
-      .setTitle(`${ELB}  LOBBY #${lobby.lobbyId} PRO  ·  ${phaseLabel}  ${ELB}`)
+      .setTitle(`🏆  LOBBY #${lobby.lobbyId} PRO  ·  ${phaseLabel}  🏆`)
       .setDescription(`${bar}\n🗺️  **Map:**  \`${lobby.map}\`\n${bar}\n\n${action}\n\n${timerBar(sec)}\n${progressBar(lobby)}`)
       .addFields(
         {name:`🔵  TEAM ${lobby.teamNumA}`,value:tA||"\u200b",inline:true},
@@ -904,31 +904,13 @@ async function championSpotlight(lobby,action,team,champ,actorId){
     const emoji=CHAMP_EMOJIS[champ]||"";
     const teamTag=team==="A"?`🔵 Team ${lobby.teamNumA}`:`🔴 Team ${lobby.teamNumB}`;
     const icon=action==="GLOBAL BAN"?"🌍":action==="BAN"?"🚫":"🎯";
-    const verb=action==="GLOBAL BAN"?"GLOBAL BANNING":action==="BAN"?"BANNING":"PICKING";
-    // Step 1 — INCOMING (gray) 0.3s
-    const e1=new EmbedBuilder()
-      .setColor(0x808080)
-      .setDescription(`${icon}  **${verb}...**\n\n# ❓ ❓ ❓\n\n*Captain <@${actorId}> is locking in...*  ·  ${teamTag}`);
-    const spotMsg=await lobby.draftChannel.send({embeds:[e1]}).catch(()=>null);
-    if(!spotMsg)return;
-    // Step 2 — REVEAL (yellow flashing) 0.3s
-    setTimeout(async()=>{
-      const e2=new EmbedBuilder()
-        .setColor(0xFFD700)
-        .setDescription(`${icon}  **${action}!**\n\n# ⚡ ${emoji} ⚡\n# **${champ.toUpperCase()}!**\n\nby <@${actorId}>  ·  ${teamTag}`);
-      await spotMsg.edit({embeds:[e2]}).catch(()=>{});
-    },300);
-    // Step 3 — LOCKED IN (final color) 1s
-    setTimeout(async()=>{
-      const finalColor=action==="GLOBAL BAN"?0xE67E22:action==="BAN"?0xED4245:0x00FF7F;
-      const stamp=action==="PICK"?"LOCKED IN":action==="BAN"?"BANNED":"GLOBAL BANNED";
-      const e3=new EmbedBuilder()
-        .setColor(finalColor)
-        .setDescription(`${icon}  **${action}**\n\n# ${emoji}\n# **${champ.toUpperCase()}**  ·  ✅ **${stamp}**\n\nby <@${actorId}>  ·  ${teamTag}`);
-      await spotMsg.edit({embeds:[e3]}).catch(()=>{});
-    },600);
-    // Delete after 1.6s total
-    setTimeout(()=>{spotMsg.delete().catch(()=>{});},1600);
+    const color=action==="GLOBAL BAN"?0xE67E22:action==="BAN"?0xED4245:0x00FF7F;
+    const stamp=action==="PICK"?"PICKED":action==="BAN"?"BANNED":"GLOBAL BANNED";
+    const embed=new EmbedBuilder()
+      .setColor(color)
+      .setDescription(`${icon}  **${stamp}**\n\n# ${emoji}\n# **${champ.toUpperCase()}**\n\nby <@${actorId}>  ·  ${teamTag}`);
+    const spotMsg=await lobby.draftChannel.send({embeds:[embed]}).catch(()=>null);
+    if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},2500);
   }catch(e){log("ERROR","championSpotlight:",e);}
 }
 
@@ -1010,7 +992,7 @@ async function finishDraft(lobby){
     const rBPro=lobby.bans.B.length>0?lobby.bans.B.map(c=>champBanDisplay(c,false)).join("  ·  "):"—";
     finalEmbed=new EmbedBuilder()
       .setColor(0xDAA520)
-      .setTitle(`${ELB}  LOBBY #${lobby.lobbyId} PRO · DRAFT COMPLETE  ${ELB}`)
+      .setTitle(`🏆  LOBBY #${lobby.lobbyId} PRO · DRAFT COMPLETE  🏆`)
       .setDescription(`${bar}\n🗺️  **Map:**  \`${lobby.map}\`\n${bar}\n\n**FINAL ROSTER**`)
       .addFields(
         {name:`🔵  TEAM ${lobby.teamNumA}`,value:lobby.teamA.map((id,i)=>`<@${id}>\n       ${champDisplay(lobby.picks.A[i]??"?")}`).join("\n\n"),inline:true},
@@ -1601,7 +1583,7 @@ client.on("messageCreate",async msg=>{try{
 
   // ── !fictifqueue — preview the Championship Broadcast style queue ──
   if(content==="!fictifqueue"){
-    const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
+    const BANNER_URL="https://i.imgur.com/3UwWd0R.jpeg";
     const fake=[
       {name:"Ashterou",elo:1480},
       {name:"Ray",elo:1180},
@@ -1633,7 +1615,7 @@ client.on("messageCreate",async msg=>{try{
   if(content==="!fictifdraft"){
     const ELB="<:ELBPRO:1496812452845977662>";
     // TODO: replace with your imgur DIRECT image URL (right-click image → Copy image address)
-    const BANNER_URL="https://i.imgur.com/sU6QjlJ.jpeg";
+    const BANNER_URL="https://i.imgur.com/3UwWd0R.jpeg";
     const ELB_IMG_URL="https://cdn.discordapp.com/emojis/1496812452845977662.png";
     const bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
     const teamA=[
@@ -1655,7 +1637,7 @@ client.on("messageCreate",async msg=>{try{
     const progressBar="▰▰▰▰▰▱▱▱▱▱▱▱  5 / 12";
     const embed=new EmbedBuilder()
       .setColor(0x8B0000)
-      .setTitle(`${ELB}  LOBBY #1 PRO — PICK PHASE  ${ELB}`)
+      .setTitle(`🏆  LOBBY #1 PRO — PICK PHASE  🏆`)
       .setDescription(`${bar}\n🗺️  **Map:**  \`Blackstone Arena Day\`\n${bar}\n\n🎯 **TEAM 1 must PICK** — Captain <@123>\n\n${timerBar}\n${progressBar}`)
       .addFields(
         {name:"🔵  TEAM 1",value:tA,inline:true},
