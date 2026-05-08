@@ -231,7 +231,7 @@ let scrim=fs.existsSync(scrimFile)?JSON.parse(fs.readFileSync(scrimFile)):{
 // dateStr: "DD/MM" or null
 // timeStr: "HH:MM" or null
 // teamA, teamB: arrays of ids (max 3 each)
-// messageId: id of main message in ray-scrim-queue
+// messageId: id of main message in scrim-queue
 // status: "open" (accepting joins) | "ready" (6/6, waiting for time) | "validated" (time reached, match in progress) | "archived"
 // replays: array of url strings
 // drafts: array of image urls (uploaded screenshots)
@@ -1705,8 +1705,8 @@ client.on("messageCreate",async msg=>{try{
   // ── !scrim (Ray + Admin) — shows create scrim hub if no active lobbies ──
   if(content==="!scrim"){
     if(msg.author.id!==RAY_ID&&!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Only Ray or admins can use this.");
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
-    if(!ch)return msg.reply("❌ Channel #ray-scrim-queue not found.");
+    const ch=msg.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
+    if(!ch)return msg.reply("❌ Channel #scrim-queue not found.");
     if(activeScrims().length>=MAX_SCRIM_LOBBIES)return msg.reply(`❌ Max ${MAX_SCRIM_LOBBIES} active scrim lobbies reached.`);
     // Create the first lobby with the user (Ray or admin) as creator
     const uid=msg.author.id;
@@ -1738,7 +1738,7 @@ client.on("messageCreate",async msg=>{try{
     lobby.teamA=lobby.teamA.filter(id=>id!==u.id);lobby.teamB=lobby.teamB.filter(id=>id!==u.id);
     if(lobby.status==="ready"&&lobby.teamA.length+lobby.teamB.length<6)lobby.status="open";
     await saveScrim();
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    const ch=msg.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
     if(ch)await updateScrimLobbyMessage(ch,lobby);
     await msg.channel.send(`✅ <@${u.id}> removed from scrim **#${lobby.id}**.`);
     return;
@@ -1750,7 +1750,7 @@ client.on("messageCreate",async msg=>{try{
     const lobbyId=parts[1].toUpperCase();
     const lobby=findScrim(lobbyId);if(!lobby)return msg.reply("❌ Scrim lobby not found.");
     if(!isScrimAuthorized(msg.author.id,lobby))return msg.reply("❌ Only the lobby admin, a scrim captain, Ray or admins can use this.");
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    const ch=msg.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
     if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});}
     if(lobby.roleId){const r=msg.guild.roles.cache.get(lobby.roleId);if(r)await r.delete().catch(()=>{});}
     scrim.lobbies=scrim.lobbies.filter(l=>l.id!==lobby.id);
@@ -1765,7 +1765,7 @@ client.on("messageCreate",async msg=>{try{
     if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
     const active=activeScrims();
     if(active.length===0)return msg.reply("ℹ️ No active scrims to cancel.");
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    const ch=msg.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
     let cancelled=0;
     for(const lobby of [...active]){
       // Delete message
@@ -1816,7 +1816,7 @@ client.on("messageCreate",async msg=>{try{
       if(role&&member)await member.roles.add(role).catch(()=>{});
     }
     await saveScrim();
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    const ch=msg.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
     if(ch)await updateScrimLobbyMessage(ch,lobby);
     await msg.channel.send(`👑 <@${target.id}> is now a captain of scrim **#${lobby.id}** — they can signup players, edit date/time, manage the lobby.`);
     const m=await msg.guild.members.fetch(target.id).catch(()=>null);
@@ -1855,7 +1855,7 @@ client.on("messageCreate",async msg=>{try{
     team.push(target.id);
     if(lobby.teamA.length+lobby.teamB.length===6&&lobby.status==="open")lobby.status="ready";
     await saveScrim();
-    const ch=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    const ch=msg.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
     if(ch)await updateScrimLobbyMessage(ch,lobby);
     await maybeAutoValidate(lobby,ch);
     await discreet(`<@${target.id}> added to ${teamLabelStr} of scrim **#${lobby.id}**.`,true);
@@ -1887,7 +1887,7 @@ client.on("messageCreate",async msg=>{try{
     await saveScrim();
     // Update live scrim message AND history recap message
     if(lobby.messageId&&lobby.status!=="archived"){
-      const scrimCh=msg.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+      const scrimCh=msg.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
       if(scrimCh)await updateScrimLobbyMessage(scrimCh,lobby);
     }
     if(lobby.historyMsgId){
@@ -2067,7 +2067,7 @@ client.on("interactionCreate",async interaction=>{try{
       if(!/^\d{1,2}:\d{2}$/.test(timeStr))return interaction.reply({content:"❌ Time format: HH:MM (e.g. 20:30).",ephemeral:true});
       lobby.dateStr=dateStr;lobby.timeStr=timeStr;
       await saveScrim();
-      const ch=interaction.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+      const ch=interaction.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
       if(ch)await updateScrimLobbyMessage(ch,lobby);
       await interaction.reply({content:`✅ Date/time set to **${dateStr} — ${timeStr}**.`,ephemeral:true});
       return;
@@ -2228,7 +2228,7 @@ client.on("interactionCreate",async interaction=>{try{
     const parts=cid.split("_");const lobbyId=parts[1].toUpperCase(),action=parts[2];
     const lobby=findScrim(lobbyId);if(!lobby)return interaction.reply({content:"❌ Lobby not found.",ephemeral:true});
     const uid=interaction.user.id;
-    const ch=interaction.guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    const ch=interaction.guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
 
     // Set date/time (open modal)
     if(action==="setdate"){
@@ -2247,7 +2247,7 @@ client.on("interactionCreate",async interaction=>{try{
       if(lobby.status!=="validated")return interaction.reply({content:"❌ Can only end a validated scrim.",ephemeral:true});
       if(!lobby.teamA.includes(uid)&&!lobby.teamB.includes(uid))return interaction.reply({content:"❌ Only players in the scrim can end the session.",ephemeral:true});
       lobby.status="archived";lobby.archivedAt=Date.now();scrim.archivedCount++;
-      // DELETE the message from #ray-scrim-queue
+      // DELETE the message from #scrim-queue
       if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});lobby.messageId=null;}
       // Post in history-scrim with screenshots/replays buttons
       const histCh=interaction.guild.channels.cache.find(c=>c.name==="history-scrim"&&c.isTextBased());
@@ -2466,7 +2466,7 @@ client.once("ready",async()=>{
     const blc=guild.channels.cache.find(c=>c.name==="top-20-ladder-bet"&&c.isTextBased());if(blc){betLadderChannel=blc;await updateBetLadder();}
     const plc=guild.channels.cache.find(c=>c.name==="top-20-ladder-pro"&&c.isTextBased());if(plc){proLadderChannel=plc;await updateProLadder();}
     // Refresh scrim hub + existing lobby messages
-    const scrimCh=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+    const scrimCh=guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
     if(scrimCh){
       await refreshCreateScrimBtn(scrimCh).catch(()=>{});
       for(const lobby of scrim.lobbies){
@@ -2547,7 +2547,7 @@ client.once("ready",async()=>{
             await genCh.send({content:`${lobby.teamA.concat(lobby.teamB).map(id=>`<@${id}>`).join(" ")}`,embeds:[recap],allowedMentions:{users:lobby.teamA.concat(lobby.teamB)}}).catch(()=>{});
           }
           // Update scrim message (now shows Upload Draft + End session buttons)
-          const ch=guild.channels.cache.find(c=>c.name==="ray-scrim-queue"&&c.isTextBased());
+          const ch=guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
           if(ch)await updateScrimLobbyMessage(ch,lobby);
         }
         log("INFO",`Scrim #${lobby.id} auto-started (time reached with 6/6 players)`);
