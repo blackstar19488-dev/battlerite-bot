@@ -862,17 +862,6 @@ function pushBoard(l){if(!l.boardMsg)return;l._boardQueue=(l._boardQueue||Promis
 async function startDraftStep(lobby){
   stopTimer(lobby);lobby.timerSeconds=DRAFT_TIMER;
   // Effect 3 + 4 (Pro only): Phase transition flash + Captain spotlight (only on actual transitions, not first step)
-  if(lobby.isPro&&lobby.draftStep>0){
-    const s=stepOf(lobby);
-    if(s){
-      const phaseStr=s.type==="ban"?(s.global?"GLOBAL BAN":"BAN"):"PICK";
-      const cap=captainOf(lobby);
-      // Phase transition flash (0.8s)
-      phaseTransitionFlash(lobby,phaseStr,s.team).catch(()=>{});
-      // Wait briefly so flash and captain spotlight don't overlap, then captain spotlight
-      setTimeout(()=>{captainTurnSpotlight(lobby,s.team,cap,phaseStr).catch(()=>{});},900);
-    }
-  }
   if(!lobby.boardMsg){lobby.boardMsg=await lobby.draftChannel.send({embeds:[boardEmbed(lobby)],components:buildDraftButtons(lobby)}).catch(()=>null);if(!lobby.boardMsg)return;}
   else await pushBoard(lobby);
   lobby.timerInterval=setInterval(async()=>{lobby.timerSeconds-=5;if(lobby.timerSeconds<=0){clearInterval(lobby.timerInterval);lobby.timerInterval=null;return;}await pushBoard(lobby);},5000);
@@ -912,69 +901,6 @@ async function championSpotlight(lobby,action,team,champ,actorId){
     const spotMsg=await lobby.draftChannel.send({embeds:[embed]}).catch(()=>null);
     if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},2500);
   }catch(e){log("ERROR","championSpotlight:",e);}
-}
-
-// Effect 4 — Captain spotlight: shown when it's a team's turn (0.8s temporary embed)
-async function captainTurnSpotlight(lobby,team,captainId,phase){
-  if(!lobby.isPro||!lobby.draftChannel)return;
-  try{
-    const teamTag=team==="A"?`🔵 TEAM ${lobby.teamNumA}`:`🔴 TEAM ${lobby.teamNumB}`;
-    const phaseEmoji=phase==="GLOBAL BAN"?"🌍":phase==="BAN"?"🚫":"🎯";
-    const color=team==="A"?0x4A90E2:0xED4245;
-    const embed=new EmbedBuilder()
-      .setColor(color)
-      .setDescription(`⚔️  **${teamTag}'S TURN**  ⚔️\n\n# ${phaseEmoji}  **${phase}**\n\n👑  Captain <@${captainId}>  •  *make your choice...*`);
-    const spotMsg=await lobby.draftChannel.send({embeds:[embed]}).catch(()=>null);
-    if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},800);
-  }catch(e){log("ERROR","captainTurnSpotlight:",e);}
-}
-
-// Effect 3 — Phase transition flash (between draft steps, 0.8s temporary embed)
-async function phaseTransitionFlash(lobby,nextPhase,nextTeam){
-  if(!lobby.isPro||!lobby.draftChannel)return;
-  try{
-    const teamLabel=nextTeam==="A"?`TEAM ${lobby.teamNumA}`:`TEAM ${lobby.teamNumB}`;
-    const phaseEmoji=nextPhase==="GLOBAL BAN"?"🌍":nextPhase==="BAN"?"🚫":"🎯";
-    const embed=new EmbedBuilder()
-      .setColor(0x9B59B6)
-      .setDescription(`═══════════════════════════\n\n   ${phaseEmoji}  **NEXT: ${teamLabel} ${nextPhase}**  ${phaseEmoji}\n\n═══════════════════════════`);
-    const spotMsg=await lobby.draftChannel.send({embeds:[embed]}).catch(()=>null);
-    if(spotMsg)setTimeout(()=>{spotMsg.delete().catch(()=>{});},800);
-  }catch(e){log("ERROR","phaseTransitionFlash:",e);}
-}
-
-// Effect 5 — Map reveal (typewriter animation at draft start, 3s temporary embed)
-async function mapRevealAnimation(lobby){
-  if(!lobby.isPro||!lobby.draftChannel||!lobby.map)return;
-  try{
-    const mapName=lobby.map.toUpperCase();
-    const e1=new EmbedBuilder()
-      .setColor(0x8B7355)
-      .setDescription(`🗺️  **MAP DRAWING...**\n\n# ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n*Spinning the wheel of destiny...*`);
-    const spotMsg=await lobby.draftChannel.send({embeds:[e1]}).catch(()=>null);
-    if(!spotMsg)return;
-    // Typewriter: reveal letters progressively
-    const totalChars=mapName.length;
-    const steps=Math.min(6,totalChars);
-    for(let i=1;i<=steps;i++){
-      await new Promise(r=>setTimeout(r,250));
-      const charsToShow=Math.floor((i/steps)*totalChars);
-      const revealed=mapName.substring(0,charsToShow);
-      const placeholder="▓".repeat(totalChars-charsToShow);
-      const e=new EmbedBuilder()
-        .setColor(0xCCAA00)
-        .setDescription(`🗺️  **MAP DRAWING...**\n\n# ${revealed}${placeholder}\n\n*${i<steps?"Revealing...":"Map locked!"}*`);
-      await spotMsg.edit({embeds:[e]}).catch(()=>{});
-    }
-    // Final reveal
-    await new Promise(r=>setTimeout(r,300));
-    const eFinal=new EmbedBuilder()
-      .setColor(0x00FF7F)
-      .setDescription(`🗺️  **MAP LOCKED**\n\n# ⚔️  ${mapName}  ⚔️\n\n✅  *Battle commences...*`);
-    await spotMsg.edit({embeds:[eFinal]}).catch(()=>{});
-    // Delete after 1.5s
-    setTimeout(()=>{spotMsg.delete().catch(()=>{});},1500);
-  }catch(e){log("ERROR","mapRevealAnimation:",e);}
 }
 
 // ─── FINISH DRAFT ────────────────────────────────────────────────────
@@ -1144,11 +1070,6 @@ async function startMatch(lobby){
     if(betProCh)lobby.betMsg=await betProCh.send({embeds:[betEmbed],components:[betRow]}).catch(()=>null);
   }else{
     lobby.betMsg=await lobby.channel.send({embeds:[betEmbed],components:[betRow]}).catch(()=>null);
-  }
-  // Effect 5 (Pro only): Map reveal typewriter animation before the draft starts
-  if(lobby.isPro){
-    await mapRevealAnimation(lobby);
-    await new Promise(r=>setTimeout(r,500)); // small pause after reveal
   }
   await startDraftStep(lobby);
 }
