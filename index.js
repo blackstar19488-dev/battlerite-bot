@@ -155,6 +155,8 @@ const proQueueJoinTime={}; // {playerId: timestamp} for 1h auto-leave
 // ─── DODGE SYSTEM (Pro only) ─────────────────────────────────────────
 const DODGE_PROTECTED_ID="110378344192675840"; // Gerninja - cannot be dodged
 const PRIORITY_USER_ID="341553327412346880"; // Silent priority — never excluded from Pro matches due to dodge conflicts
+const PRIORITY_USER_IDS=new Set(["341553327412346880","110378344192675840"]); // Silent priority players (Ken + Gerninja)
+const isPriorityUser=(id)=>PRIORITY_USER_IDS.has(id);
 const dodgeFile=p("dodge.json");
 let dodges=fs.existsSync(dodgeFile)?JSON.parse(fs.readFileSync(dodgeFile)):{}; // {userId: [dodgedId1, dodgedId2, ...]}
 async function saveDodges(){try{await fs.promises.writeFile(dodgeFile,JSON.stringify(dodges,null,2));}catch(e){log("ERROR","saveDodges:",e);}}
@@ -172,11 +174,10 @@ function getAllDodgedInPro(){
 }
 function findValidScrimGroup(){
   // Find 6 players in proQueue where no one dodges another in the group
-  // Returns the array of 6 player IDs that can form a match, or null if impossible
   if(proQueue.length<6)return null;
-  // Check for dodge conflict — PRIORITY_USER_ID never conflicts (silent priority)
+  // Check for dodge conflict — priority users never conflict (silent priority)
   const hasConflict=(a,b)=>{
-    if(a===PRIORITY_USER_ID||b===PRIORITY_USER_ID)return false;
+    if(isPriorityUser(a)||isPriorityUser(b))return false;
     return (dodges[a]||[]).includes(b)||(dodges[b]||[]).includes(a);
   };
   const tryGreedy=(startList)=>{
@@ -191,23 +192,22 @@ function findValidScrimGroup(){
     }
     return selected.length===6?selected:null;
   };
-  // If priority user is in queue, always try with them FIRST
-  if(proQueue.includes(PRIORITY_USER_ID)){
-    const rest=proQueue.filter(id=>id!==PRIORITY_USER_ID);
-    let result=tryGreedy([PRIORITY_USER_ID,...rest]);
+  // Priority users go FIRST in the queue
+  const priorityInQ=proQueue.filter(id=>isPriorityUser(id));
+  const restOriginal=proQueue.filter(id=>!isPriorityUser(id));
+  if(priorityInQ.length>0){
+    let result=tryGreedy([...priorityInQ,...restOriginal]);
     if(result)return result;
   }
-  // Try original order first
+  // Fallback: original order
   let result=tryGreedy(proQueue);
   if(result)return result;
-  // Try non-dodged first (less conflicts likely)
+  // Fallback: non-dodged first
   const dodgedSet=getAllDodgedInPro();
-  const nonDodged=proQueue.filter(id=>!dodgedSet.has(id));
-  const dodged=proQueue.filter(id=>dodgedSet.has(id));
-  // Priority user comes first even if technically dodged
-  if(proQueue.includes(PRIORITY_USER_ID)){
-    const others=[...nonDodged,...dodged].filter(id=>id!==PRIORITY_USER_ID);
-    result=tryGreedy([PRIORITY_USER_ID,...others]);
+  const nonDodged=proQueue.filter(id=>!dodgedSet.has(id)&&!isPriorityUser(id));
+  const dodged=proQueue.filter(id=>dodgedSet.has(id)&&!isPriorityUser(id));
+  if(priorityInQ.length>0){
+    result=tryGreedy([...priorityInQ,...nonDodged,...dodged]);
     if(result)return result;
   }
   result=tryGreedy([...nonDodged,...dodged]);
@@ -252,6 +252,36 @@ let tournament=fs.existsSync(tournamentFile)?JSON.parse(fs.readFileSync(tourname
 };
 async function saveTournament(){try{await fs.promises.writeFile(tournamentFile,JSON.stringify(tournament,null,2));}catch(e){log("ERROR","saveTournament:",e);}}
 const TOURNAMENT_MAX_PLAYERS=42;
+
+// ─── TOURNAMENT TEAMS (fixed for ELB Tournament Scrim) ───────────────
+// Teams are named after the 1st player (the captain, who gets 👑)
+const TOURNAMENT_TEAMS=[
+  {captain:"359006543292661761",name:"Calce",players:["359006543292661761","170554095982215168","243425733140021250"]},        // 1 — Calce, Tilome, Slyex
+  {captain:"279249193195929601",name:"Sheepa",players:["279249193195929601","340533480633139200","383985021255417856"]},      // 2 — Sheepa, inique?, Zeiy_
+  {captain:"297822209999634442",name:"Quesket",players:["297822209999634442","155111345178542081","1458166356674351265"]},    // 3 — Quesket, Refreshman, Tevos
+  {captain:"161555294386782208",name:"Sparagmos",players:["161555294386782208","1409560124258783353","208641020169027584"]},  // 4 — Sparagmos, Mechanics, Knemo
+  {captain:"295547494128156672",name:"Cha1x",players:["295547494128156672","175675112123662337","171296837762809857"]},       // 5 — Cha1x, Antaresiq, Xeyth
+  {captain:"224952328124497920",name:"DaHaaamr",players:["224952328124497920","365864339355205643","257269731789242369"]},    // 6 — DaHaaamr, Gedank, VelikiGolub
+  {captain:"405409738000564224",name:"Fiully",players:["405409738000564224","158176670115823617","245671110744473600"]},      // 7 — Fiully, Bo4, Ray
+  {captain:"134014379938021381",name:"Wickedman",players:["134014379938021381","490860729830866944","409378627554377739"]},   // 8 — Wickedman, Light, Kosmik
+  {captain:"168806701082869760",name:"Barcis",players:["168806701082869760","341934743505469450","249153011769802752"]},      // 9 — Barcis, immarl, Ыson
+  {captain:"110378344192675840",name:"Gerninja",players:["110378344192675840","341553327412346880","375298867760988160"]}     // 10 — Gerninja, Ashterou, Hanlosh
+];
+function getPlayerTeam(playerId){return TOURNAMENT_TEAMS.find(t=>t.players.includes(playerId))||null;}
+function isInTournament(playerId){return TOURNAMENT_TEAMS.some(t=>t.players.includes(playerId));}
+
+// ─── TOURNAMENT SCRIM STATE ──────────────────────────────────────────
+const tscrimFile=p("tscrim.json");
+let tscrim=fs.existsSync(tscrimFile)?JSON.parse(fs.readFileSync(tscrimFile)):{
+  lobbies:[], // {id, creatorId, roleId, dateStr, timeStr, teamSlotA, teamSlotB, messageId, status, createdAt, archivedAt, historyMsgId}
+  createBtnMsgId:null,
+  archivedCount:0
+};
+async function saveTscrim(){try{await fs.promises.writeFile(tscrimFile,JSON.stringify(tscrim,null,2));}catch(e){log("ERROR","saveTscrim:",e);}}
+function findTscrim(id){return tscrim.lobbies.find(l=>l.id===id);}
+function activeTscrims(){return tscrim.lobbies.filter(l=>l.status!=="archived");}
+function generateTscrimId(){let id;do{id=Math.floor(Math.random()*0xFFFF).toString(16).toUpperCase().padStart(4,"0");}while(findTscrim(id));return id;}
+const MAX_TSCRIM_LOBBIES=10;
 function generateScrimId(){return Math.random().toString(16).slice(2,6).toUpperCase();}
 function findScrim(id){return scrim.lobbies.find(l=>l.id===id);}
 function activeScrims(){return scrim.lobbies.filter(l=>l.status!=="archived");}
@@ -587,6 +617,129 @@ async function refreshTournamentEmbed(client){
     const msg=await ch.messages.fetch(tournament.messageId).catch(()=>null);if(!msg)return;
     await msg.edit({embeds:[tournamentEmbed()],components:tournamentBtns()}).catch(()=>{});
   }catch(e){log("ERROR","refreshTournamentEmbed:",e);}
+}
+
+// ─── TOURNAMENT SCRIM EMBED / BUTTONS ────────────────────────────────
+function tscrimWhenTimestamp(lobby){
+  // Reuse scrimWhenTimestamp logic with same date/time format
+  if(!lobby.dateStr||!lobby.timeStr)return null;
+  return scrimUnixSeconds(lobby);
+}
+function tscrimTimestampStr(lobby){
+  const u=tscrimWhenTimestamp(lobby);
+  if(!u)return lobby.dateStr&&lobby.timeStr?`**${lobby.dateStr} — ${lobby.timeStr}**`:"*No date/time set*";
+  return `<t:${u}:F> (<t:${u}:R>)`;
+}
+function teamCardDisplay(teamIdx){
+  if(teamIdx==null||teamIdx<0||teamIdx>=TOURNAMENT_TEAMS.length)return "*[Empty]*";
+  const t=TOURNAMENT_TEAMS[teamIdx];
+  const rows=t.players.map((id,i)=>{
+    const crown=id===t.captain?"👑 ":"   ";
+    return `${crown}<@${id}>`;
+  }).join("\n");
+  return `**${t.name}'s Team**\n${rows}`;
+}
+function tscrimLobbyEmbed(lobby){
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 ${tscrimTimestampStr(lobby)}`:"📅 *No date/time set*";
+  const tAEmpty=lobby.teamSlotA==null,tBEmpty=lobby.teamSlotB==null;
+  const teamA=tAEmpty?"*[Empty — Click Team 1 to fill]*":teamCardDisplay(lobby.teamSlotA);
+  const teamB=tBEmpty?"*[Empty — Click Team 2 to fill]*":teamCardDisplay(lobby.teamSlotB);
+  let statusStr;
+  if(lobby.status==="validated")statusStr=`⚔️ Match in progress`;
+  else if(lobby.status==="ready")statusStr=`✅ Both teams locked — Waiting for scheduled time`;
+  else{
+    const filled=(tAEmpty?0:1)+(tBEmpty?0:1);
+    statusStr=`${filled} / 2 teams ready`;
+  }
+  const color=lobby.status==="validated"?0x57F287:lobby.status==="ready"?0xF1C40F:0x9B59B6;
+  return new EmbedBuilder()
+    .setTitle(`🏆  ELB TOURNAMENT SCRIM #${lobby.id}`)
+    .setColor(color)
+    .setDescription(`${whenStr}\n👑 **Lobby Admin:** <@${lobby.creatorId}>\n\n━━━━━━━━━━━━━━━━━━━━━━`)
+    .addFields(
+      {name:"🔵 TEAM 1",value:teamA,inline:true},
+      {name:"\u200b",value:"\u200b",inline:true},
+      {name:"🔴 TEAM 2",value:teamB,inline:true}
+    )
+    .setFooter({text:statusStr});
+}
+function tscrimLobbyBtns(lobby){
+  const canJoin=lobby.status==="open"||lobby.status==="ready";
+  const tAFull=lobby.teamSlotA!=null,tBFull=lobby.teamSlotB!=null;
+  const row1=new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`tscrim_${lobby.id}_joinA`).setLabel("🔵 Team 1").setStyle(ButtonStyle.Primary).setDisabled(tAFull||!canJoin),
+    new ButtonBuilder().setCustomId(`tscrim_${lobby.id}_joinB`).setLabel("🔴 Team 2").setStyle(ButtonStyle.Danger).setDisabled(tBFull||!canJoin),
+    new ButtonBuilder().setCustomId(`tscrim_${lobby.id}_leave`).setLabel("❌ Leave").setStyle(ButtonStyle.Secondary).setDisabled(lobby.status==="archived"||lobby.status==="validated")
+  );
+  const row2=new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`tscrim_${lobby.id}_setdate`).setLabel("📅 Set date/time").setStyle(ButtonStyle.Secondary).setDisabled(lobby.status!=="open"&&lobby.status!=="ready")
+  );
+  if(lobby.status==="validated"){
+    row2.addComponents(new ButtonBuilder().setCustomId(`tscrim_${lobby.id}_end`).setLabel("🏁 End scrim session").setStyle(ButtonStyle.Success));
+  }
+  return [row1,row2];
+}
+async function updateTscrimLobbyMessage(channel,lobby){
+  try{
+    if(!lobby.messageId)return;
+    const msg=await channel.messages.fetch(lobby.messageId).catch(()=>null);
+    if(msg)await msg.edit({embeds:[tscrimLobbyEmbed(lobby)],components:tscrimLobbyBtns(lobby)}).catch(()=>{});
+  }catch(e){log("ERROR","updateTscrimLobbyMessage:",e);}
+}
+function tscrimHistoryEmbed(lobby){
+  const whenStr=lobby.dateStr&&lobby.timeStr?`📅 ${tscrimTimestampStr(lobby)}`:"📅 *No date/time*";
+  const tA=lobby.teamSlotA!=null?teamCardDisplay(lobby.teamSlotA):"—";
+  const tB=lobby.teamSlotB!=null?teamCardDisplay(lobby.teamSlotB):"—";
+  return new EmbedBuilder()
+    .setTitle(`🏁  Tournament Scrim #${lobby.id} — Recap`)
+    .setColor(0x57F287)
+    .setDescription(`${whenStr}\n\n👑 **Lobby Admin:** <@${lobby.creatorId}>`)
+    .addFields(
+      {name:"🔵 Team 1",value:tA,inline:true},
+      {name:"\u200b",value:"\u200b",inline:true},
+      {name:"🔴 Team 2",value:tB,inline:true}
+    ).setTimestamp();
+}
+async function refreshCreateTscrimBtn(channel){
+  if(!channel)return;
+  const embed=new EmbedBuilder()
+    .setTitle("🏆  TOURNAMENT SCRIM HUB")
+    .setColor(0x9B59B6)
+    .setDescription(`Click below to create a new tournament scrim lobby.\nMax **${MAX_TSCRIM_LOBBIES}** active lobbies at once.\n\n**Active lobbies:** ${activeTscrims().length}/${MAX_TSCRIM_LOBBIES}`);
+  const btn=new ButtonBuilder().setCustomId("tscrim_create").setLabel("➕ Create new scrim").setStyle(ButtonStyle.Success).setDisabled(activeTscrims().length>=MAX_TSCRIM_LOBBIES);
+  const row=new ActionRowBuilder().addComponents(btn);
+  try{
+    if(tscrim.createBtnMsgId){
+      const m=await channel.messages.fetch(tscrim.createBtnMsgId).catch(()=>null);
+      if(m){await m.delete().catch(()=>{});}
+    }
+    const newMsg=await channel.send({embeds:[embed],components:[row]});
+    tscrim.createBtnMsgId=newMsg.id;
+    await saveTscrim();
+  }catch(e){log("ERROR","refreshCreateTscrimBtn:",e);}
+}
+async function maybeAutoValidateTscrim(lobby,channel){
+  if(lobby.status!=="ready")return false;
+  if(lobby.teamSlotA==null||lobby.teamSlotB==null)return false;
+  const u=tscrimWhenTimestamp(lobby);
+  if(!u)return false;
+  if(Math.floor(Date.now()/1000)<u)return false;
+  lobby.status="validated";
+  await saveTscrim();
+  if(channel)await updateTscrimLobbyMessage(channel,lobby);
+  const guild=channel?.guild;
+  if(guild){
+    const genCh=guild.channels.cache.find(c=>c.name==="general-scrim-chat"&&c.isTextBased());
+    if(genCh){
+      const tA=TOURNAMENT_TEAMS[lobby.teamSlotA],tB=TOURNAMENT_TEAMS[lobby.teamSlotB];
+      const all=[...tA.players,...tB.players];
+      const embed=new EmbedBuilder().setTitle(`🏆  Tournament Scrim #${lobby.id} — Starting now!`).setColor(0x57F287)
+        .setDescription(`📅 ${tscrimTimestampStr(lobby)}\n\n**🔵 ${tA.name}'s Team:**\n${tA.players.map(id=>`<@${id}>`).join("\n")}\n\n**🔴 ${tB.name}'s Team:**\n${tB.players.map(id=>`<@${id}>`).join("\n")}\n\n*Good luck and have fun!*`)
+        .setTimestamp();
+      await genCh.send({content:all.map(id=>`<@${id}>`).join(" "),embeds:[embed],allowedMentions:{users:all}}).catch(()=>{});
+    }
+  }
+  return true;
 }
 
 function scrimLobbyEmbed(lobby){
@@ -1502,6 +1655,40 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
+  // ── !tourneyscrim — show the tournament scrim hub (Admin only) ──
+  if(content==="!tourneyscrim"){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const ch=msg.guild.channels.cache.find(c=>c.name==="elb-tournament-scrim"&&c.isTextBased());
+    if(!ch)return msg.reply("❌ Channel #elb-tournament-scrim not found. Create it first.");
+    await refreshCreateTscrimBtn(ch);
+    await msg.reply(`✅ Tournament scrim hub posted in <#${ch.id}>.`);
+    return;
+  }
+
+  // ── !tsignup <lobbyId> <teamNum> vs <teamNum> (Admin — force match-up) ──
+  if(content.startsWith("!tsignup")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const parts=content.split(/\s+/);
+    // Format: !tsignup <lobbyId> <N> vs <M>
+    if(parts.length<5)return msg.reply("Usage: `!tsignup <lobbyId> <teamA#> vs <teamB#>`  (e.g. `!tsignup A3F7 3 vs 7`)");
+    const lobbyId=parts[1].toUpperCase();
+    const teamANum=parseInt(parts[2]),teamBNum=parseInt(parts[4]);
+    if(isNaN(teamANum)||isNaN(teamBNum)||teamANum<1||teamANum>10||teamBNum<1||teamBNum>10)return msg.reply("❌ Team numbers must be 1–10.");
+    if(teamANum===teamBNum)return msg.reply("❌ A team can't scrim itself.");
+    const lobby=findTscrim(lobbyId);if(!lobby)return msg.reply("❌ Tournament scrim lobby not found.");
+    if(lobby.status==="archived"||lobby.status==="validated")return msg.reply("❌ Can't modify a validated/archived scrim.");
+    lobby.teamSlotA=teamANum-1;
+    lobby.teamSlotB=teamBNum-1;
+    if(lobby.teamSlotA!=null&&lobby.teamSlotB!=null&&lobby.status==="open")lobby.status="ready";
+    await saveTscrim();
+    const ch=msg.guild.channels.cache.find(c=>c.name==="elb-tournament-scrim"&&c.isTextBased());
+    if(ch)await updateTscrimLobbyMessage(ch,lobby);
+    await maybeAutoValidateTscrim(lobby,ch);
+    const tA=TOURNAMENT_TEAMS[lobby.teamSlotA],tB=TOURNAMENT_TEAMS[lobby.teamSlotB];
+    await msg.reply(`✅ Match-up set: **${tA.name}'s Team** vs **${tB.name}'s Team** (Scrim #${lobby.id}).`);
+    return;
+  }
+
   // ── !fictifqueue — preview the Championship Broadcast style queue ──
   if(content==="!fictifqueue"){
     const BANNER_URL="https://i.imgur.com/3UwWd0R.jpeg";
@@ -1593,7 +1780,8 @@ client.on("messageCreate",async msg=>{try{
     "**Pro Dodge (Admin only):**\n`!dodge @victim for @owner` — Make @owner dodge @victim\n`!undodge @victim for @owner` — Remove dodge\n`!mydodge for @owner` — Show @owner's dodge list\n\n"+
     "**Admin:**\n`!setelo @player N` / `!setMMR @player N` / `!setMMR pro @player N`\n`!resetstats` / `!resetstats pro` — Reset all\n`!resetelostats @player` / `!resetelostats pro @player`\n`!oldstats` / `!oldstats pro` — Undo reset\n`!MMRreset` / `!MMRreset pro`\n`!clearqueue` / `!clearqueue pro`\n`!proqueue @player` — Force-add a player to Pro queue\n`!eloban @player` / `!elounban @player`\n`!placement @player` / `!unplacement @player` — Pro placement\n`!resetlobby` / `!resetlobby N` / `!resetlobby pro`\n`!cancel N` / `!cancel N pro`\n\n"+
     "**Scrim:**\n`!scrim` — Create a new scrim lobby (anyone)\n`!signup @player t1|t2 <id>` — Add a player to a team (lobby admin/captain/Ray/admin)\n`!captainscrim @player <id>` — Assign a scrim captain (lobby admin/Ray/admin)\n`!removescrim <id> @player` — Remove a player (lobby admin/captain/Ray/admin)\n`!cancelscrim <id>` — Cancel and delete a scrim (lobby admin/captain/Ray/admin)\n`!draft <id>` (with image attached) — Upload a draft screenshot\n\n"+
-    "**Tournament (Admin only):**\n`!tournament <name> — <date>` — Create a new tournament & post sign-up board\n`!signuptourney @p1 @p2 ...` — Bulk add players to the tournament pool\n`!removetourney @p1 @p2 ...` — Bulk remove players\n`!setcaptain @p1 @p2 ...` — Designate captains (max 10)\n`!unsetcaptain @p1 @p2 ...` — Remove captain status\n`!resettournament` — Wipe the active tournament"
+    "**Tournament (Admin only):**\n`!tournament <name> — <date>` — Create a new tournament & post sign-up board\n`!signuptourney @p1 @p2 ...` — Bulk add players to the tournament pool\n`!removetourney @p1 @p2 ...` — Bulk remove players\n`!setcaptain @p1 @p2 ...` — Designate captains (max 10)\n`!unsetcaptain @p1 @p2 ...` — Remove captain status\n`!resettournament` — Wipe the active tournament\n\n"+
+    "**ELB Tournament Scrim:**\n`!tourneyscrim` — Post the Tournament Scrim hub (Admin)\n`!tsignup <id> <N> vs <M>` — Force a team match-up (Admin)\nPlayers click 🔵/🔴 in a lobby — their entire team fills the slot automatically"
   )]});return;}
 
   // ── !command — buttons menu (ephemeral) ──
@@ -1993,6 +2181,25 @@ client.on("interactionCreate",async interaction=>{try{
       await interaction.reply({content:`✅ Date/time set to **${dateStr} — ${timeStr}**.`,ephemeral:true});
       return;
     }
+    // Tournament scrim date/time modal
+    if(cid.startsWith("tscrim_setdate_")){
+      const lobbyId=cid.replace("tscrim_setdate_","");
+      const lobby=findTscrim(lobbyId);if(!lobby)return interaction.reply({content:"❌ Lobby not found.",ephemeral:true});
+      const uid=interaction.user.id;
+      const isAuth=ADMIN_IDS.includes(uid)||uid===lobby.creatorId;
+      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin or admins can edit.",ephemeral:true});
+      const dateStr=interaction.fields.getTextInputValue("date").trim();
+      const timeStr=interaction.fields.getTextInputValue("time").trim();
+      if(!/^\d{1,2}\/\d{1,2}$/.test(dateStr))return interaction.reply({content:"❌ Date format: DD/MM (e.g. 28/05).",ephemeral:true});
+      if(!/^\d{1,2}:\d{2}$/.test(timeStr))return interaction.reply({content:"❌ Time format: HH:MM (e.g. 20:30).",ephemeral:true});
+      lobby.dateStr=dateStr;lobby.timeStr=timeStr;
+      await saveTscrim();
+      const ch=interaction.guild.channels.cache.find(c=>c.name==="elb-tournament-scrim"&&c.isTextBased());
+      if(ch)await updateTscrimLobbyMessage(ch,lobby);
+      await maybeAutoValidateTscrim(lobby,ch);
+      await interaction.reply({content:`✅ Date/time set to **${dateStr} — ${timeStr}**.`,ephemeral:true});
+      return;
+    }
     // !command modals
     if(cid.startsWith("cmd_modal_")){
       const action=cid.replace("cmd_modal_","");
@@ -2121,6 +2328,118 @@ client.on("interactionCreate",async interaction=>{try{
   }
 
   // ── Scrim: Create new lobby ──
+  // ── Tournament Scrim: Create lobby (button in elb-tournament-scrim) ──
+  if(cid==="tscrim_create"){
+    if(activeTscrims().length>=MAX_TSCRIM_LOBBIES)return interaction.reply({content:`❌ Max ${MAX_TSCRIM_LOBBIES} active scrim lobbies reached.`,ephemeral:true});
+    const uid=interaction.user.id;
+    // Only tournament participants OR admins can create
+    if(!isInTournament(uid)&&!ADMIN_IDS.includes(uid))return interaction.reply({content:"❌ Only tournament participants can create a scrim.",ephemeral:true});
+    const lobbyId=generateTscrimId();
+    // Create a unique role
+    const role=await interaction.guild.roles.create({name:`Tournament Scrim #${lobbyId}`,mentionable:false,reason:"Tournament scrim lobby admin"}).catch(()=>null);
+    const member=await interaction.guild.members.fetch(uid).catch(()=>null);
+    if(role&&member)await member.roles.add(role).catch(()=>{});
+    const newLobby={
+      id:lobbyId,creatorId:uid,roleId:role?.id??null,dateStr:null,timeStr:null,
+      teamSlotA:null,teamSlotB:null,messageId:null,status:"open",
+      historyMsgId:null,createdAt:Date.now()
+    };
+    tscrim.lobbies.push(newLobby);
+    const ch=interaction.channel;
+    const lobbyMsg=await ch.send({embeds:[tscrimLobbyEmbed(newLobby)],components:tscrimLobbyBtns(newLobby)}).catch(()=>null);
+    if(lobbyMsg)newLobby.messageId=lobbyMsg.id;
+    await saveTscrim();
+    await refreshCreateTscrimBtn(ch);
+    await interaction.reply({content:`✅ Tournament Scrim **#${lobbyId}** created! You're now the lobby admin.`,ephemeral:true});
+    return;
+  }
+
+  // ── Tournament Scrim: lobby buttons (dynamic) ──
+  if(cid.startsWith("tscrim_")&&!cid.startsWith("tscrim_create")){
+    const parts=cid.split("_");
+    if(parts.length<3)return;
+    const lobbyId=parts[1].toUpperCase(),action=parts[2];
+    const lobby=findTscrim(lobbyId);if(!lobby)return interaction.reply({content:"❌ Lobby not found.",ephemeral:true});
+    const uid=interaction.user.id;
+    const ch=interaction.guild.channels.cache.find(c=>c.name==="elb-tournament-scrim"&&c.isTextBased());
+
+    // Set date/time (open modal)
+    if(action==="setdate"){
+      const isAuth=ADMIN_IDS.includes(uid)||uid===lobby.creatorId;
+      if(!isAuth)return interaction.reply({content:"❌ Only the lobby admin or server admins can edit.",ephemeral:true});
+      const modal=new ModalBuilder().setCustomId(`tscrim_setdate_${lobby.id}`).setTitle(`Set date/time — TScrim #${lobby.id}`);
+      const dateInput=new TextInputBuilder().setCustomId("date").setLabel("Date (DD/MM)").setStyle(TextInputStyle.Short).setPlaceholder("28/05").setRequired(true).setValue(lobby.dateStr||"");
+      const timeInput=new TextInputBuilder().setCustomId("time").setLabel("Time (HH:MM, Paris)").setStyle(TextInputStyle.Short).setPlaceholder("20:30").setRequired(true).setValue(lobby.timeStr||"");
+      modal.addComponents(new ActionRowBuilder().addComponents(dateInput),new ActionRowBuilder().addComponents(timeInput));
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // Join Team 1 / Team 2 — fills the slot with the player's tournament team
+    if(action==="joinA"||action==="joinB"){
+      if(lobby.status!=="open"&&lobby.status!=="ready")return interaction.reply({content:"❌ This scrim is not accepting teams anymore.",ephemeral:true});
+      const team=getPlayerTeam(uid);
+      if(!team)return interaction.reply({content:"❌ You are not part of the tournament.",ephemeral:true});
+      const teamIdx=TOURNAMENT_TEAMS.indexOf(team);
+      // Check if this team is already in either slot
+      if(lobby.teamSlotA===teamIdx||lobby.teamSlotB===teamIdx)return interaction.reply({content:`❌ Your team (**${team.name}'s Team**) is already in this scrim.`,ephemeral:true});
+      const slotKey=action==="joinA"?"teamSlotA":"teamSlotB";
+      const slotLabel=action==="joinA"?"Team 1":"Team 2";
+      if(lobby[slotKey]!=null)return interaction.reply({content:`❌ ${slotLabel} is already filled by another team.`,ephemeral:true});
+      lobby[slotKey]=teamIdx;
+      if(lobby.teamSlotA!=null&&lobby.teamSlotB!=null&&lobby.status==="open")lobby.status="ready";
+      await saveTscrim();
+      if(ch)await updateTscrimLobbyMessage(ch,lobby);
+      await maybeAutoValidateTscrim(lobby,ch);
+      await interaction.reply({content:`✅ **${team.name}'s Team** joined ${slotLabel} of Scrim #${lobby.id}!`,ephemeral:true});
+      return;
+    }
+
+    // Leave — only the captain of one of the 2 teams, or an admin, can leave
+    if(action==="leave"){
+      const team=getPlayerTeam(uid);
+      const isAdmin=ADMIN_IDS.includes(uid)||uid===lobby.creatorId;
+      if(!team&&!isAdmin)return interaction.reply({content:"❌ You are not part of the tournament.",ephemeral:true});
+      const teamIdx=team?TOURNAMENT_TEAMS.indexOf(team):-1;
+      let removedSlot=null;
+      if(lobby.teamSlotA===teamIdx){lobby.teamSlotA=null;removedSlot="Team 1";}
+      else if(lobby.teamSlotB===teamIdx){lobby.teamSlotB=null;removedSlot="Team 2";}
+      else if(isAdmin){
+        // Admin can leave from any team or both
+        return interaction.reply({content:"ℹ️ Admins should use `!tsignup` to manage teams directly.",ephemeral:true});
+      }
+      if(!removedSlot)return interaction.reply({content:"❌ Your team is not in this scrim.",ephemeral:true});
+      if(lobby.status==="ready"&&(lobby.teamSlotA==null||lobby.teamSlotB==null))lobby.status="open";
+      await saveTscrim();
+      if(ch)await updateTscrimLobbyMessage(ch,lobby);
+      await interaction.reply({content:`❌ **${team.name}'s Team** left ${removedSlot} of Scrim #${lobby.id}.`,ephemeral:true});
+      return;
+    }
+
+    // End scrim session — any player in either team
+    if(action==="end"){
+      if(lobby.status!=="validated")return interaction.reply({content:"❌ Can only end a validated scrim.",ephemeral:true});
+      const team=getPlayerTeam(uid);
+      const isAdmin=ADMIN_IDS.includes(uid)||uid===lobby.creatorId;
+      const teamIdx=team?TOURNAMENT_TEAMS.indexOf(team):-1;
+      const inMatch=teamIdx===lobby.teamSlotA||teamIdx===lobby.teamSlotB;
+      if(!inMatch&&!isAdmin)return interaction.reply({content:"❌ Only players in the scrim or admins can end the session.",ephemeral:true});
+      lobby.status="archived";lobby.archivedAt=Date.now();tscrim.archivedCount++;
+      // Delete the message from elb-tournament-scrim
+      if(ch&&lobby.messageId){const m=await ch.messages.fetch(lobby.messageId).catch(()=>null);if(m)await m.delete().catch(()=>{});lobby.messageId=null;}
+      // Post in tournament-scrim-history
+      const histCh=interaction.guild.channels.cache.find(c=>c.name==="tournament-scrim-history"&&c.isTextBased());
+      if(histCh){
+        const histMsg=await histCh.send({embeds:[tscrimHistoryEmbed(lobby)]}).catch(()=>null);
+        if(histMsg){lobby.historyMsgId=histMsg.id;await saveTscrim();}
+      }
+      if(ch)await refreshCreateTscrimBtn(ch);
+      await interaction.reply({content:`🏁 Tournament Scrim **#${lobby.id}** ended and archived to #tournament-scrim-history!`,ephemeral:true});
+      return;
+    }
+    return;
+  }
+
   if(cid==="scrim_create"){
     if(activeScrims().length>=MAX_SCRIM_LOBBIES)return interaction.reply({content:"❌ Max 5 active scrim lobbies reached.",ephemeral:true});
     const uid=interaction.user.id;
@@ -2394,6 +2713,14 @@ client.once("ready",async()=>{
         if(lobby.status!=="archived")await updateScrimLobbyMessage(scrimCh,lobby).catch(()=>{});
       }
     }
+    // Refresh tournament scrim hub + existing lobby messages
+    const tscrimCh=guild.channels.cache.find(c=>c.name==="elb-tournament-scrim"&&c.isTextBased());
+    if(tscrimCh){
+      await refreshCreateTscrimBtn(tscrimCh).catch(()=>{});
+      for(const lobby of tscrim.lobbies){
+        if(lobby.status!=="archived")await updateTscrimLobbyMessage(tscrimCh,lobby).catch(()=>{});
+      }
+    }
   }
   // Weekly recap every hour check, Sunday 20:00 UTC
   setInterval(async()=>{
@@ -2484,6 +2811,32 @@ client.once("ready",async()=>{
         }
         lobby.roleId=null;
         await saveScrim();
+      }
+    }
+
+    // ── Tournament Scrim auto-start: when scheduled time reached AND both teams locked ──
+    for(const lobby of tscrim.lobbies){
+      if(lobby.status!=="ready")continue;
+      if(lobby.teamSlotA==null||lobby.teamSlotB==null)continue;
+      const u=tscrimWhenTimestamp(lobby);
+      if(!u)continue;
+      if(Math.floor(Date.now()/1000)<u)continue;
+      // Time reached — auto-validate
+      for(const[,guild]of client.guilds.cache){
+        const ch=guild.channels.cache.find(c=>c.name==="elb-tournament-scrim"&&c.isTextBased());
+        await maybeAutoValidateTscrim(lobby,ch);
+      }
+    }
+
+    // Tournament Scrim role cleanup (24h after archive)
+    for(const lobby of tscrim.lobbies){
+      if(lobby.status==="archived"&&lobby.roleId&&lobby.archivedAt&&(nowMs-lobby.archivedAt)>=24*3600_000){
+        for(const[,guild]of client.guilds.cache){
+          const r=guild.roles.cache.get(lobby.roleId);
+          if(r)await r.delete("Tournament scrim archived 24h ago").catch(()=>{});
+        }
+        lobby.roleId=null;
+        await saveTscrim();
       }
     }
   },60_000);
