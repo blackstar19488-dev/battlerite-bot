@@ -1768,6 +1768,20 @@ client.on("messageCreate",async msg=>{try{
     return;
   }
 
+  // ── !ix (Admin only — fake all-season recap, not shown in help) ──
+  if(content==="!ix"){
+    if(!ADMIN_IDS.includes(msg.author.id))return;
+    await msg.delete().catch(()=>{});
+    const desc=`**📊 Matches:** 1398\n**🏃 Most Active:** <@341553327412346880>`;
+    const embed=new EmbedBuilder().setTitle("📅  All Season Recap").setColor(0xF1C40F).setDescription(desc).setTimestamp();
+    const channelNames=["general-pro-chat","general-chat-elb"];
+    for(const chName of channelNames){
+      const ch=msg.guild.channels.cache.find(c=>c.name===chName&&c.isTextBased());
+      if(ch)await ch.send({content:"@here",embeds:[embed],allowedMentions:{parse:["everyone"]}}).catch(()=>{});
+    }
+    return;
+  }
+
   // ── !captain ──
   if(content==="!captain"){const lobby=findLobbyByDraftChannel(msg.channel.id);if(!lobby||!lobby.active||lobby.phase!=="draft")return;const uid=msg.author.id;
     if(lobby.teamA.includes(uid)){lobby.captainA=uid;await msg.channel.send(`👑 <@${uid}> is now captain of **Team ${lobby.teamNumA}${lobby.isPro?" Pro":""}**!`);pushBoard(lobby);}
