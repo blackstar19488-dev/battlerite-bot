@@ -30,6 +30,22 @@ const placementFile = p("placement.json");
 let placementPlayers = new Set(fs.existsSync(placementFile) ? JSON.parse(fs.readFileSync(placementFile)) : []);
 async function savePlacement(){try{await fs.promises.writeFile(placementFile,JSON.stringify([...placementPlayers]));}catch(e){}}
 
+// ─── 1v1 PRO STATS ────────────────────────────────────────────────────
+const stats1v1File=p("stats-1v1.json");
+let stats1v1=fs.existsSync(stats1v1File)?JSON.parse(fs.readFileSync(stats1v1File)):{};
+async function saveStats1v1(){try{await fs.promises.writeFile(stats1v1File,JSON.stringify(stats1v1,null,2));}catch(e){log("ERROR","saveStats1v1:",e);}}
+function ensurePlayer1v1(id){if(!stats1v1[id])stats1v1[id]={elo:1000,wins:0,losses:0,peakElo:1000,games:0};}
+
+// 1v1 queue state
+let queue1v1=[]; // array of player IDs
+let lobbies1v1=[]; // active 1v1 matches: {id, p1, p2, voiceChId, textChId, msgId, status, createdAt}
+let queue1v1Messages={}; // {channelId: messageObject}
+let _queue1v1Lock=false;
+const queue1v1JoinTime={};
+const MAX_1V1_LOBBIES=10;
+function findLobby1v1ByPlayer(id){return lobbies1v1.find(l=>l.p1===id||l.p2===id);}
+function generateLobby1v1Id(){let id;do{id=Math.floor(Math.random()*0xFFFF).toString(16).toUpperCase().padStart(4,"0");}while(lobbies1v1.find(l=>l.id===id));return id;}
+
 // ─── PRO ACTIVITY & AFK TRACKING ─────────────────────────────────────
 const proActivityFile = p("pro-activity.json");
 let proActivity = fs.existsSync(proActivityFile) ? JSON.parse(fs.readFileSync(proActivityFile)) : {}; // {playerId: {lastGame:ts, decayCount:N, afks:[ts1,ts2,...]}}
@@ -910,6 +926,219 @@ async function refreshQueue(channel,isPro,locked=false){
 // Concurrency lock per channel to prevent two repushes running at the same time (was causing duplicates)
 const _repushLocks={};
 
+// ─── 1V1 QUEUE / MATCH ────────────────────────────────────────────────
+function queue1v1Embed(){
+  const BANNER_URL="https://i.imgur.com/3UwWd0R.jpeg";
+  const slots=2;
+  const filledSeg=Math.min(12,Math.round((queue1v1.length/slots)*12));
+  const progressBar=`▰`.repeat(filledSeg)+`▱`.repeat(12-filledSeg);
+  const missing=Math.max(0,slots-queue1v1.length);
+  let color=0x00BFFF;
+  if(queue1v1.length>=2)color=0x00FF7F;
+  else if(queue1v1.length===1)color=0xFFD700;
+
+  let body;
+  if(queue1v1.length===0){
+    body=`# 🔥  ${missing}  PLAYERS NEEDED  🔥\n\n${progressBar}\n\u200b\n**1v1 PRO QUEUE**  •  *Click JOIN to enter*`;
+  }else{
+    const rows=queue1v1.map((id,i)=>{
+      const elo=stats1v1[id]?.elo??1000;
+      return `\`${String(i+1).padStart(2," ")}\`  <@${id}>  ·  \`${String(elo).padStart(4," ")} ELO\``;
+    }).join("\n");
+    let header;
+    if(queue1v1.length>=2){
+      header=`# ⚡⚡⚡  MATCH READY  ⚡⚡⚡\n# 🔥  STARTING NOW  🔥`;
+    }else{
+      header=`# 🔥  ${missing}  PLAYER NEEDED  🔥`;
+    }
+    body=`${header}\n\n${progressBar}  **${queue1v1.length} / ${slots}**\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n${rows}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**1v1 PRO MATCH**`;
+  }
+  return new EmbedBuilder()
+    .setColor(color)
+    .setTitle("⚔️  1v1 PRO QUEUE  ⚔️")
+    .setDescription(body)
+    .setThumbnail(BANNER_URL)
+    .setFooter({text:"⚔️  Click JOIN for a 1v1 duel"});
+}
+function queue1v1Btns(disabled=false){
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("q1v1_join").setLabel("✅  Join").setStyle(ButtonStyle.Success).setDisabled(disabled),
+    new ButtonBuilder().setCustomId("q1v1_leave").setLabel("❌  Leave").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+  );
+}
+const _repush1v1Locks={};
+async function repushQueue1v1(channel){
+  const chId=channel.id;
+  if(_repush1v1Locks[chId])return;
+  _repush1v1Locks[chId]=true;
+  try{
+    try{
+      const recent=await channel.messages.fetch({limit:50});
+      const allQueueMsgs=recent.filter(m=>{
+        if(m.author.id!==client.user.id)return false;
+        if(m.embeds.length===0)return false;
+        const t=m.embeds[0].title||"";
+        return t.includes("1v1");
+      });
+      for(const[,m]of allQueueMsgs)await m.delete().catch(()=>{});
+    }catch(e){}
+    delete queue1v1Messages[chId];
+    queue1v1Messages[chId]=await channel.send({embeds:[queue1v1Embed()],components:[queue1v1Btns()]});
+  }finally{
+    _repush1v1Locks[chId]=false;
+  }
+}
+
+function match1v1Embed(lobby){
+  const BANNER_URL="https://i.imgur.com/3UwWd0R.jpeg";
+  ensurePlayer1v1(lobby.p1);ensurePlayer1v1(lobby.p2);
+  const e1=stats1v1[lobby.p1].elo,e2=stats1v1[lobby.p2].elo;
+  const desc=`# ⚔️  1v1 DUEL  ⚔️\n\n# <@${lobby.p1}>\n# **vs**\n# <@${lobby.p2}>\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n\`${String(e1).padStart(4," ")} ELO\`  ⚔️  \`${String(e2).padStart(4," ")} ELO\`\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n🎮 **Pick your champions in-game**\n🔊 Join the dedicated voice channel\n\n*Click the winner below when the match ends.*`;
+  return new EmbedBuilder()
+    .setColor(0x8B0000)
+    .setTitle(`⚔️  1v1 MATCH #${lobby.id}  ⚔️`)
+    .setDescription(desc)
+    .setThumbnail(BANNER_URL)
+    .setFooter({text:"One click to declare the winner  •  Cancel button if needed"});
+}
+function match1v1Btns(lobby){
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`m1v1_${lobby.id}_win1`).setLabel(`🏆 Player 1 Wins`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`m1v1_${lobby.id}_win2`).setLabel(`🏆 Player 2 Wins`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`m1v1_${lobby.id}_cancel`).setLabel("❌ Cancel Match").setStyle(ButtonStyle.Danger)
+  )];
+}
+
+// Compute 1v1 ELO change with K=24 below 1200, K=16 above
+function compute1v1EloChange(winnerElo,loserElo){
+  const expected=1/(1+Math.pow(10,(loserElo-winnerElo)/400));
+  const k=winnerElo<1200?24:16;
+  const change=Math.max(1,Math.round(k*(1-expected)));
+  return change;
+}
+
+let ladder1v1Channel=null;
+async function updateLadder1v1(){
+  if(!ladder1v1Channel)return;
+  try{
+    const ranked=Object.entries(stats1v1).filter(([,s])=>s.games>0).sort(([,a],[,b])=>b.elo-a.elo).slice(0,20);
+    let desc;
+    if(ranked.length===0){
+      desc="*No matches played yet.*";
+    }else{
+      desc=ranked.map(([id,s],i)=>{
+        const total=s.wins+s.losses,wr=total>0?Math.round(s.wins/total*100):0;
+        const medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":`\`#${i+1}\``;
+        return `${medal}  <@${id}>  ·  \`${s.elo} ELO\`  ·  ${s.wins}W ${s.losses}L  ·  ${wr}%`;
+      }).join("\n");
+    }
+    const embed=new EmbedBuilder()
+      .setTitle("🏆  TOP 20 — 1V1 LADDER  🏆")
+      .setColor(0xFFD700)
+      .setDescription(desc)
+      .setTimestamp();
+    // Delete previous ladder messages, post new
+    const recent=await ladder1v1Channel.messages.fetch({limit:20}).catch(()=>null);
+    if(recent)for(const[,m]of recent.filter(m=>m.author.id===client.user.id))await m.delete().catch(()=>{});
+    await ladder1v1Channel.send({embeds:[embed]}).catch(()=>{});
+  }catch(e){log("ERROR","updateLadder1v1:",e);}
+}
+
+// Start a 1v1 match: create voice + text channel, post embed, ping both players
+async function start1v1Match(guild){
+  if(queue1v1.length<2)return;
+  if(_queue1v1Lock)return;
+  _queue1v1Lock=true;
+  try{
+    if(lobbies1v1.length>=MAX_1V1_LOBBIES){_queue1v1Lock=false;return;}
+    const p1=queue1v1.shift(),p2=queue1v1.shift();
+    delete queue1v1JoinTime[p1];delete queue1v1JoinTime[p2];
+    const lobbyId=generateLobby1v1Id();
+    // Find category if any (we put channels under same category as the existing queue if found)
+    const queueCh=guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());
+    const parent=queueCh?.parent?.id??null;
+    // Create temp text channel
+    const textCh=await guild.channels.create({
+      name:`1v1-match-${lobbyId.toLowerCase()}`,
+      type:0, // GuildText
+      parent,
+      permissionOverwrites:[]
+    }).catch(e=>{log("ERROR","create text 1v1:",e);return null;});
+    if(!textCh){_queue1v1Lock=false;return;}
+    // Create temp voice channel
+    const voiceCh=await guild.channels.create({
+      name:`🔊 1v1 MATCH #${lobbyId} — JOIN`,
+      type:2, // GuildVoice
+      parent,
+      permissionOverwrites:[]
+    }).catch(e=>{log("ERROR","create voice 1v1:",e);return null;});
+    const lobby={
+      id:lobbyId,p1,p2,
+      textChId:textCh.id,voiceChId:voiceCh?.id??null,
+      msgId:null,status:"active",createdAt:Date.now()
+    };
+    lobbies1v1.push(lobby);
+    // Customize match embed labels to actual player names
+    const matchMsg=await textCh.send({
+      content:`<@${p1}> <@${p2}> — Your 1v1 match is starting!`,
+      embeds:[match1v1Embed(lobby)],
+      components:match1v1ButtonsWithNames(lobby,guild),
+      allowedMentions:{users:[p1,p2]}
+    }).catch(e=>{log("ERROR","send 1v1 match msg:",e);return null;});
+    if(matchMsg)lobby.msgId=matchMsg.id;
+    // Refresh queue
+    if(queueCh)await repushQueue1v1(queueCh).catch(()=>{});
+  }catch(e){log("ERROR","start1v1Match:",e);}
+  finally{_queue1v1Lock=false;}
+}
+
+// Buttons with actual player names
+function match1v1ButtonsWithNames(lobby,guild){
+  const m1=guild.members.cache.get(lobby.p1),m2=guild.members.cache.get(lobby.p2);
+  const n1=m1?(m1.displayName||m1.user.username).slice(0,30):"Player 1";
+  const n2=m2?(m2.displayName||m2.user.username).slice(0,30):"Player 2";
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`m1v1_${lobby.id}_win1`).setLabel(`🏆 ${n1} wins`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`m1v1_${lobby.id}_win2`).setLabel(`🏆 ${n2} wins`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`m1v1_${lobby.id}_cancel`).setLabel("❌ Cancel Match").setStyle(ButtonStyle.Danger)
+  )];
+}
+
+async function finishMatch1v1(lobby,winnerId,loserId,guild){
+  ensurePlayer1v1(winnerId);ensurePlayer1v1(loserId);
+  const wElo=stats1v1[winnerId].elo,lElo=stats1v1[loserId].elo;
+  const change=compute1v1EloChange(wElo,lElo);
+  stats1v1[winnerId].elo+=change;
+  stats1v1[loserId].elo=Math.max(0,stats1v1[loserId].elo-change);
+  stats1v1[winnerId].wins+=1;
+  stats1v1[loserId].losses+=1;
+  stats1v1[winnerId].games+=1;
+  stats1v1[loserId].games+=1;
+  if(stats1v1[winnerId].elo>stats1v1[winnerId].peakElo)stats1v1[winnerId].peakElo=stats1v1[winnerId].elo;
+  await saveStats1v1();
+  lobby.status="finished";
+  lobbies1v1=lobbies1v1.filter(l=>l.id!==lobby.id);
+  // Delete temp channels
+  if(lobby.textChId){const ch=guild.channels.cache.get(lobby.textChId);if(ch)await ch.delete().catch(()=>{});}
+  if(lobby.voiceChId){const ch=guild.channels.cache.get(lobby.voiceChId);if(ch)await ch.delete().catch(()=>{});}
+  // Update ladder
+  await updateLadder1v1();
+  // Refresh queue
+  const queueCh=guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());
+  if(queueCh)await repushQueue1v1(queueCh).catch(()=>{});
+  // Try to start next match if queue >= 2
+  if(queue1v1.length>=2)setTimeout(()=>start1v1Match(guild),1000);
+}
+
+async function cancel1v1Match(lobby,guild){
+  lobby.status="cancelled";
+  lobbies1v1=lobbies1v1.filter(l=>l.id!==lobby.id);
+  if(lobby.textChId){const ch=guild.channels.cache.get(lobby.textChId);if(ch)await ch.delete().catch(()=>{});}
+  if(lobby.voiceChId){const ch=guild.channels.cache.get(lobby.voiceChId);if(ch)await ch.delete().catch(()=>{});}
+  const queueCh=guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());
+  if(queueCh)await repushQueue1v1(queueCh).catch(()=>{});
+}
+
 // Delete ALL queue messages in the channel, then post ONE new queue message at the bottom
 async function repushQueue(channel,isPro,locked=false){
   const chId=channel.id;
@@ -1351,19 +1580,23 @@ async function cleanupLobby(lobby){
 const _autoRepushPending={}; // per-channel debounce
 client.on("messageCreate",async msg=>{
   try{
-    if(msg.channel.name!=="queue-elb-pro"&&msg.channel.name!=="queue-lobby-elo")return;
-    // IGNORE anything the bot posts (queue messages, recaps, AFK, etc.)
-    // This prevents the infinite loop of bot posting → trigger → repush → new message → trigger...
+    const isQueueLobbyElo=msg.channel.name==="queue-lobby-elo";
+    const isQueueElbPro=msg.channel.name==="queue-elb-pro";
+    const is1v1=msg.channel.name==="1v1-queue-pro";
+    if(!isQueueLobbyElo&&!isQueueElbPro&&!is1v1)return;
     if(msg.author.id===client.user.id)return;
     const chId=msg.channel.id;
-    // Debounce: if already scheduled, skip
     if(_autoRepushPending[chId])return;
-    const isProCh=msg.channel.name==="queue-elb-pro";
     _autoRepushPending[chId]=setTimeout(async()=>{
       delete _autoRepushPending[chId];
       try{
-        const lm=isProCh?proLobbies:lobbies;
-        await repushQueue(msg.channel,isProCh,allSlotsActive(lm));
+        if(is1v1){
+          await repushQueue1v1(msg.channel);
+        }else{
+          const isProCh=isQueueElbPro;
+          const lm=isProCh?proLobbies:lobbies;
+          await repushQueue(msg.channel,isProCh,allSlotsActive(lm));
+        }
       }catch(e){log("ERROR","auto-repush:",e);}
     },2500);
   }catch(e){log("ERROR","auto-repush handler:",e);}
@@ -2328,6 +2561,67 @@ client.on("interactionCreate",async interaction=>{try{
   }
 
   // ── Tournament: self-signup button ──
+  // ── 1v1 Queue: Join/Leave buttons ──
+  if(cid==="q1v1_join"){
+    if(_queue1v1Lock)return interaction.reply({content:"⏳ Wait, match starting.",ephemeral:true});
+    const uid=interaction.user.id;
+    // Check Pro role
+    const member=await interaction.guild.members.fetch(uid).catch(()=>null);
+    const hasPro=member?.roles.cache.some(r=>r.name==="Pro");
+    if(!hasPro)return interaction.reply({content:"❌ You need the **Pro** role to queue.",ephemeral:true});
+    if(bannedPlayers.has(uid))return interaction.reply({content:"❌ You are banned from queues.",ephemeral:true});
+    if(queue1v1.includes(uid))return interaction.reply({content:"ℹ️ Already in the 1v1 queue.",ephemeral:true});
+    if(findLobby1v1ByPlayer(uid))return interaction.reply({content:"❌ You are already in an active 1v1 match.",ephemeral:true});
+    if(queue1v1.length>=2)return interaction.reply({content:"⏳ Queue is full, please wait.",ephemeral:true});
+    ensurePlayer1v1(uid);
+    queue1v1.push(uid);
+    queue1v1JoinTime[uid]=Date.now();
+    await interaction.deferUpdate().catch(()=>{});
+    const queueCh=interaction.guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());
+    if(queueCh)await repushQueue1v1(queueCh).catch(()=>{});
+    // Start match if 2 in queue
+    if(queue1v1.length>=2){
+      setTimeout(()=>start1v1Match(interaction.guild),500);
+    }
+    return;
+  }
+  if(cid==="q1v1_leave"){
+    const uid=interaction.user.id;
+    if(!queue1v1.includes(uid))return interaction.reply({content:"ℹ️ You are not in the 1v1 queue.",ephemeral:true});
+    queue1v1=queue1v1.filter(id=>id!==uid);
+    delete queue1v1JoinTime[uid];
+    await interaction.deferUpdate().catch(()=>{});
+    const queueCh=interaction.guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());
+    if(queueCh)await repushQueue1v1(queueCh).catch(()=>{});
+    return;
+  }
+
+  // ── 1v1 Match: Wins / Cancel buttons ──
+  if(cid.startsWith("m1v1_")){
+    const parts=cid.split("_");
+    if(parts.length<3)return;
+    const lobbyId=parts[1].toUpperCase(),action=parts[2];
+    const lobby=lobbies1v1.find(l=>l.id===lobbyId);
+    if(!lobby)return interaction.reply({content:"❌ Match not found or already ended.",ephemeral:true});
+    const uid=interaction.user.id;
+    const isPlayer=uid===lobby.p1||uid===lobby.p2;
+    const isAdmin=ADMIN_IDS.includes(uid);
+    if(!isPlayer&&!isAdmin)return interaction.reply({content:"❌ Only the 2 players or admins can use these buttons.",ephemeral:true});
+    if(action==="win1"||action==="win2"){
+      const winnerId=action==="win1"?lobby.p1:lobby.p2;
+      const loserId=action==="win1"?lobby.p2:lobby.p1;
+      await interaction.reply({content:`🏆 <@${winnerId}> wins! Match ending...`,allowedMentions:{users:[winnerId]}}).catch(()=>{});
+      await finishMatch1v1(lobby,winnerId,loserId,interaction.guild);
+      return;
+    }
+    if(action==="cancel"){
+      await interaction.reply({content:"❌ Match cancelled.",ephemeral:false}).catch(()=>{});
+      await cancel1v1Match(lobby,interaction.guild);
+      return;
+    }
+    return;
+  }
+
   if(cid==="tournament_signup"){
     if(!tournament.active)return interaction.reply({content:"❌ No active tournament.",ephemeral:true});
     if(tournament.status!=="signup")return interaction.reply({content:"❌ Sign ups are closed.",ephemeral:true});
@@ -2719,6 +3013,9 @@ client.once("ready",async()=>{
     const lc=guild.channels.cache.find(c=>c.name==="top-20-ladder"&&c.isTextBased());if(lc){ladderChannel=lc;await updateLadder();}
     const blc=guild.channels.cache.find(c=>c.name==="top-20-ladder-bet"&&c.isTextBased());if(blc){betLadderChannel=blc;await updateBetLadder();}
     const plc=guild.channels.cache.find(c=>c.name==="top-20-ladder-pro"&&c.isTextBased());if(plc){proLadderChannel=plc;await updateProLadder();}
+    // 1v1 ladder + queue init
+    const l1v1c=guild.channels.cache.find(c=>c.name==="top-1v1-ladder"&&c.isTextBased());if(l1v1c){ladder1v1Channel=l1v1c;await updateLadder1v1();}
+    const q1v1c=guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());if(q1v1c)await repushQueue1v1(q1v1c).catch(()=>{});
     // Refresh scrim hub + existing lobby messages
     const scrimCh=guild.channels.cache.find(c=>c.name==="scrim-queue"&&c.isTextBased());
     if(scrimCh){
@@ -2772,6 +3069,29 @@ client.once("ready",async()=>{
       if(qCh)await repushQueue(qCh,true).catch(()=>{});
     }
     log("INFO",`Removed ${toRemove.length} inactive players from pro queue after 1h`);
+  },60_000);
+
+  // ── 1h auto-leave for 1v1 queue ──
+  setInterval(async()=>{
+    if(queue1v1.length===0)return;
+    const now=Date.now(),ONE_HOUR=3600_000;
+    const toRemove=[];
+    for(const id of queue1v1){
+      const joinTs=queue1v1JoinTime[id];
+      if(joinTs&&(now-joinTs)>=ONE_HOUR)toRemove.push(id);
+    }
+    if(toRemove.length===0)return;
+    queue1v1=queue1v1.filter(id=>!toRemove.includes(id));
+    for(const[,guild]of client.guilds.cache){
+      for(const id of toRemove){
+        delete queue1v1JoinTime[id];
+        const mb=await guild.members.fetch(id).catch(()=>null);
+        if(mb)await mb.send(`⏰ You've been removed from the 1v1 queue after 1 hour of inactivity.`).catch(()=>{});
+      }
+      const qCh=guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());
+      if(qCh)await repushQueue1v1(qCh).catch(()=>{});
+    }
+    log("INFO",`Removed ${toRemove.length} inactive players from 1v1 queue after 1h`);
   },60_000);
 
   // ── Scrim auto-start cron: when scheduled time is reached AND 6/6 players, start immediately ──
