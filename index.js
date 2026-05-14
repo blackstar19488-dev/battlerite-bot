@@ -191,9 +191,11 @@ function getAllDodgedInPro(){
 function findValidScrimGroup(){
   // Find 6 players in proQueue where no one dodges another in the group
   if(proQueue.length<6)return null;
-  // Check for dodge conflict — priority users never conflict (silent priority)
+  // Check for dodge conflict — dodges are ALWAYS respected.
+  // Priority users get pick order priority but their dodges (or dodges against them) still count.
+  // The way priority works: if there's a conflict, the priority user stays in the group and the OTHER (non-priority) gets dropped.
+  // hasConflict returns true → these two cannot coexist; tryGreedy adds in order so the first one stays.
   const hasConflict=(a,b)=>{
-    if(isPriorityUser(a)||isPriorityUser(b))return false;
     return (dodges[a]||[]).includes(b)||(dodges[b]||[]).includes(a);
   };
   const tryGreedy=(startList)=>{
