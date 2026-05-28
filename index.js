@@ -2395,6 +2395,35 @@ client.on("messageCreate",async msg=>{try{
     lm.clear();if(isPro)proQueue=[];else queue=[];
     await refreshQueue(msg.channel,isPro).catch(()=>{});await msg.channel.send(`🔄 ${isPro?"Pro — all":"All"} lobbies/queue reset.`);return;}
 
+  // ── !remove 1 loose for @player (Admin only — remove an unjust 1v1 loss) ──
+  if(content.startsWith("!remove 1 loose for")){
+    if(!ADMIN_IDS.includes(msg.author.id))return msg.reply("❌ Admin only.");
+    const u=msg.mentions.users.first();
+    if(!u)return msg.reply("Usage: `!remove 1 loose for @player`");
+    ensurePlayer1v1(u.id);
+    const s=stats1v1[u.id];
+    if(s.losses<=0)return msg.reply(`❌ <@${u.id}> has no losses to remove.`);
+    const oldLosses=s.losses;
+    s.losses=Math.max(0,s.losses-1);
+    s.games=Math.max(0,s.games-1);
+    await saveStats1v1();
+    await updateLadder1v1();
+    // Refresh 1v1 queue display
+    const queueCh=msg.guild.channels.cache.find(c=>c.name==="1v1-queue-pro"&&c.isTextBased());
+    if(queueCh)await repushQueue1v1(queueCh).catch(()=>{});
+    await msg.channel.send({embeds:[new EmbedBuilder()
+      .setTitle("✅ 1v1 Loss Removed")
+      .setColor(0x57F287)
+      .setDescription(`<@${u.id}>'s 1v1 record has been corrected.`)
+      .addFields(
+        {name:"Losses",value:`\`${oldLosses}\` → \`${s.losses}\``,inline:true},
+        {name:"Games",value:`\`${s.games+1}\` → \`${s.games}\``,inline:true},
+        {name:"ELO",value:`\`${s.elo}\``,inline:true}
+      )
+    ]});
+    return;
+  }
+
   // ── !cancel ──
   if(base.startsWith("!cancel")){const hp=msg.member?.permissions.has(PermissionsBitField.Flags.ManageChannels)||ADMIN_IDS.includes(msg.author.id);if(!hp)return;
     const args=base.split(/\s+/);const num=parseInt(args[1]);const lm=isPro?proLobbies:lobbies;
