@@ -944,8 +944,7 @@ function queue1v1Embed(){
     body=`# 🔥  ${missing}  PLAYERS NEEDED  🔥\n\n${progressBar}\n\u200b\n**1v1 PRO QUEUE**  •  *Click JOIN to enter*`;
   }else{
     const rows=queue1v1.map((id,i)=>{
-      const elo=stats1v1[id]?.elo??1000;
-      return `\`${String(i+1).padStart(2," ")}\`  <@${id}>  ·  \`${String(elo).padStart(4," ")} ELO\``;
+      return `\`${String(i+1).padStart(2," ")}\`  \`Player ${i+1}\``;
     }).join("\n");
     let header;
     if(queue1v1.length>=2){
