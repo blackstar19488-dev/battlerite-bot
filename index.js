@@ -862,7 +862,7 @@ function queueEmbed(isPro){
 
   if(isPro){
     // OPTION A — CHAMPIONSHIP BROADCAST
-    const BANNER_URL="https://i.imgur.com/3UwWd0R.jpeg";
+    const BANNER_URL="https://i.imgur.com/6pADBzN.jpeg";
     // Color shifts based on queue state: empty (cyan glacé) → filling (gold) → ready (electric green)
     let color=0x00BFFF; // cyan glacé default
     if(q.length>=6)color=0x00FF7F; // electric green
