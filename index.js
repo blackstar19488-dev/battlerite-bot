@@ -29,6 +29,9 @@ let bannedPlayers = new Set(fs.existsSync(bannedFile) ? JSON.parse(fs.readFileSy
 const placementFile = p("placement.json");
 let placementPlayers = new Set(fs.existsSync(placementFile) ? JSON.parse(fs.readFileSync(placementFile)) : []);
 async function savePlacement(){try{await fs.promises.writeFile(placementFile,JSON.stringify([...placementPlayers]));}catch(e){}}
+const placementXFile = p("placementx.json");
+let placementXPlayers = new Set(fs.existsSync(placementXFile) ? JSON.parse(fs.readFileSync(placementXFile)) : []);
+async function savePlacementX(){try{await fs.promises.writeFile(placementXFile,JSON.stringify([...placementXPlayers]));}catch(e){}}
 
 // ─── 1v1 PRO STATS ────────────────────────────────────────────────────
 const stats1v1File=p("stats-1v1.json");
@@ -1473,9 +1476,9 @@ async function finishMatch(lobby,winner){
     if(isUpset)st[id].clutchWins=(st[id].clutchWins||0)+1;
   });
   // Check if any loser is in placement (pro only)
-  const hasPlacement = lobby.isPro && losers.some(id => placementPlayers.has(id));
+  const hasPlacement = lobby.isPro && losers.some(id => placementPlayers.has(id) || placementXPlayers.has(id));
   losers.forEach(id=>{ens(id);const r=calculateElo(st[id].elo,avgW,false);
-    if(hasPlacement && !placementPlayers.has(id)){
+    if(hasPlacement && !placementPlayers.has(id) && !placementXPlayers.has(id)){
       // Teammate of placement player: 0 ELO loss
       changes[id]=0;st[id].losses++;st[id].games++;st[id].currentStreak=0;
     }else{
@@ -1708,6 +1711,26 @@ client.on("messageCreate",async msg=>{try{
     if(!placementPlayers.has(u.id))return msg.reply("❌ This player is not in placement.");
     placementPlayers.delete(u.id);await savePlacement();
     await msg.channel.send(`✅ <@${u.id}> is no longer in placement mode.`);return;
+  }
+
+  // ── !placementx / !unplacementx (Admin + Staff — priority placement, no skip) ──
+  if(content.startsWith("!placementx")&&!content.startsWith("!unplacementx")){
+    const isAllowed=ADMIN_IDS.includes(msg.author.id)||msg.member?.roles.cache.some(r=>r.name==="Staff");
+    if(!isAllowed)return msg.reply("❌ You need Admin or Staff role.");
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!placementx @player`");
+    const mb=await msg.guild.members.fetch(u.id).catch(()=>null);
+    if(!mb||!mb.roles.cache.some(r=>r.name==="Pro"))return msg.reply("❌ This player does not have the Pro role.");
+    if(placementXPlayers.has(u.id))return msg.reply("❌ This player is already in placement-X.");
+    placementXPlayers.add(u.id);await savePlacementX();
+    await msg.channel.send(`📋 <@${u.id}> is now in **placement-X mode** (Pro). Teammates won't lose ELO — but this player keeps full queue priority.`);return;
+  }
+  if(content.startsWith("!unplacementx")){
+    const isAllowed=ADMIN_IDS.includes(msg.author.id)||msg.member?.roles.cache.some(r=>r.name==="Staff");
+    if(!isAllowed)return msg.reply("❌ You need Admin or Staff role.");
+    const u=msg.mentions.users.first();if(!u)return msg.reply("Usage: `!unplacementx @player`");
+    if(!placementXPlayers.has(u.id))return msg.reply("❌ This player is not in placement-X.");
+    placementXPlayers.delete(u.id);await savePlacementX();
+    await msg.channel.send(`✅ <@${u.id}> is no longer in placement-X mode.`);return;
   }
 
   // ── !dodge / !undodge / !mydodge (Admin-only — manage on behalf of players) ──
